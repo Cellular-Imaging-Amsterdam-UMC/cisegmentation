@@ -1,0 +1,208 @@
+citations:
+- name: cisegmentation
+  doi: https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation
+  license: MIT
+  description: GPU-enabled OME-Zarr instance segmentation with Cellpose, StarDist, InstanSeg, and Spotiflow.
+docker_image:
+  org: cellularimagingcf
+  name: w_cisegmentation
+  tag: latest
+  platform: linux/amd64
+algorithm_folder_name: cisegmentation_inference
+exec_function:
+  name: generate_cli_command
+  cli_command: python wrapper.py
+  hidden_args:
+  - cli_tag: --local
+    value: "true"
+    append_value: false
+    cli_order: 3
+inputs:
+- name: infolder
+  type: image
+  label: Input OME-Zarrs
+  description: Folder containing regular or HCS OME-Zarr inputs.
+  cli_tag: --infolder
+  cli_order: 1
+  default: directory
+  optional: false
+  format: [zarr]
+  unique_string: [.ome.zarr]
+  folder_name: /data/in
+  file_count: multiple
+  section_id: inputs
+  mode: beginner
+  subtype: [grayscale, color]
+  depth: true
+  timepoints: true
+  tiled: true
+  pyramidal: true
+outputs:
+- name: outfolder
+  type: image
+  label: Segmentation Outputs
+  description: Folder receiving labeled OME-Zarrs, including one multichannel OME-Zarr gallery in benchmark mode.
+  cli_tag: --outfolder
+  cli_order: 2
+  default: directory
+  optional: false
+  format: [zarr]
+  unique_string: [.ome.zarr]
+  folder_name: /data/out
+  file_count: multiple
+  section_id: outputs
+  mode: beginner
+  subtype: [label]
+  depth: true
+  timepoints: true
+  tiled: true
+  pyramidal: true
+display_only: []
+parameters:
+- name: model
+  type: dropdown
+  label: Model
+  description: Model checkpoint used for normal inference.
+  options:
+  - {label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}
+  - {label: Cellpose 3 cyto3, value: 'cellpose3:cyto3'}
+  - {label: Cellpose 3 cyto2 cp3, value: 'cellpose3:cyto2_cp3'}
+  - {label: Cellpose 3 TissueNet cp3, value: 'cellpose3:tissuenet_cp3'}
+  - {label: Cellpose 3 LiveCell cp3, value: 'cellpose3:livecell_cp3'}
+  - {label: Cellpose 3 yeast phase contrast, value: 'cellpose3:yeast_PhC_cp3'}
+  - {label: Cellpose 3 yeast brightfield, value: 'cellpose3:yeast_BF_cp3'}
+  - {label: Cellpose 3 bacteria phase, value: 'cellpose3:bact_phase_cp3'}
+  - {label: Cellpose 3 bacteria fluorescence, value: 'cellpose3:bact_fluor_cp3'}
+  - {label: Cellpose 3 DeepBacs, value: 'cellpose3:deepbacs_cp3'}
+  - {label: Cellpose cyto2, value: 'cellpose3:cyto2'}
+  - {label: Cellpose cyto, value: 'cellpose3:cyto'}
+  - {label: Cellpose CPx, value: 'cellpose3:CPx'}
+  - {label: Cellpose transformer cp3, value: 'cellpose3:transformer_cp3'}
+  - {label: Cellpose NeurIPS default, value: 'cellpose3:neurips_cellpose_default'}
+  - {label: Cellpose NeurIPS transformer, value: 'cellpose3:neurips_cellpose_transformer'}
+  - {label: Cellpose NeurIPS grayscale cyto2, value: 'cellpose3:neurips_grayscale_cyto2'}
+  - {label: Cellpose CP, value: 'cellpose3:CP'}
+  - {label: Cellpose TN1, value: 'cellpose3:TN1'}
+  - {label: Cellpose TN2, value: 'cellpose3:TN2'}
+  - {label: Cellpose TN3, value: 'cellpose3:TN3'}
+  - {label: Cellpose LC1, value: 'cellpose3:LC1'}
+  - {label: Cellpose LC2, value: 'cellpose3:LC2'}
+  - {label: Cellpose LC3, value: 'cellpose3:LC3'}
+  - {label: Cellpose LC4, value: 'cellpose3:LC4'}
+  - {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}
+  - {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}
+  - {label: StarDist foci aggregates, value: 'stardist:SD_Foci_Aggregates'}
+  - {label: StarDist foci Finn, value: 'stardist:SD_Foci_Finn'}
+  - {label: InstanSeg brightfield nuclei, value: 'instanseg:brightfield_nuclei'}
+  - {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}
+  - {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}
+  - {label: Spotiflow general, value: 'spotiflow:general'}
+  - {label: Spotiflow HYBISS, value: 'spotiflow:hybiss'}
+  - {label: Spotiflow synthetic complex, value: 'spotiflow:synth_complex'}
+  - {label: Spotiflow synthetic 3D, value: 'spotiflow:synth_3d'}
+  - {label: Spotiflow smFISH 3D, value: 'spotiflow:smfish_3d'}
+  - {label: Spotiflow fluorescence live, value: 'spotiflow:fluo_live'}
+  default: 'cellpose3:nuclei'
+  multiselect: false
+  cli_tag: --model
+  cli_order: 10
+  optional: true
+  section_id: essential
+  mode: beginner
+- name: target
+  type: dropdown
+  label: Segmentation Target
+  description: Biological target the selected model must support.
+  options:
+  - {label: Nuclei, value: nuclei}
+  - {label: Cells, value: cells}
+  - {label: Foci, value: foci}
+  - {label: Spots, value: spots}
+  default: nuclei
+  multiselect: false
+  cli_tag: --target
+  cli_order: 11
+  optional: true
+  section_id: essential
+  mode: beginner
+- {name: primary_channel, type: integer, label: Primary Channel, description: One-based primary signal channel., default: 1, minimum: 1, cli_tag: --primary-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
+- {name: nuclei_channel, type: integer, label: Nuclei Channel, description: Optional one-based nuclei channel; use 0 for none., default: 0, minimum: 0, cli_tag: --nuclei-channel, cli_order: 13, optional: true, section_id: essential, mode: beginner}
+- {name: input_channels, type: textbox, label: Input Channel Override, description: Optional comma-separated one-based channel list for RGB or multiplexed models., default: '', cli_tag: --input-channels, cli_order: 14, optional: true, section_id: advanced, mode: advanced}
+- name: device
+  type: dropdown
+  label: Compute Device
+  description: Auto uses CUDA when available.
+  options: [{label: Auto, value: auto}, {label: CUDA, value: cuda}, {label: CPU, value: cpu}]
+  default: auto
+  multiselect: false
+  cli_tag: --device
+  cli_order: 15
+  optional: true
+  section_id: advanced
+  mode: advanced
+- name: dimension_mode
+  type: dropdown
+  label: Dimension Mode
+  description: Auto uses native 3D for supported models and slice-wise 2D otherwise.
+  options: [{label: Auto, value: auto}, {label: Force slice-wise 2D, value: slice-2d}]
+  default: auto
+  multiselect: false
+  cli_tag: --dimension-mode
+  cli_order: 16
+  optional: true
+  section_id: advanced
+  mode: advanced
+- {name: diameter, type: float, label: Cellpose Diameter, description: Diameter in pixels; 0 uses model default., default: 0.0, minimum: 0.0, cli_tag: --diameter, cli_order: 20, optional: true, section_id: method, mode: advanced}
+- {name: cellprob_threshold, type: float, label: Cellpose Probability Threshold, description: Cellpose cell probability threshold., default: 0.0, cli_tag: --cellprob-threshold, cli_order: 21, optional: true, section_id: method, mode: advanced}
+- {name: flow_threshold, type: float, label: Cellpose Flow Threshold, description: Cellpose flow error threshold., default: 0.4, minimum: 0.0, cli_tag: --flow-threshold, cli_order: 22, optional: true, section_id: method, mode: advanced}
+- {name: stardist_prob_threshold, type: float, label: StarDist Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --stardist-prob-threshold, cli_order: 23, optional: true, section_id: method, mode: advanced}
+- {name: stardist_nms_threshold, type: float, label: StarDist NMS Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --stardist-nms-threshold, cli_order: 24, optional: true, section_id: method, mode: advanced}
+- {name: instanseg_pixel_size_um, type: float, label: InstanSeg Pixel Size, description: Micrometers per pixel; 0 uses OME-Zarr metadata., default: 0.0, minimum: 0.0, cli_tag: --instanseg-pixel-size-um, cli_order: 25, optional: true, section_id: method, mode: advanced}
+- {name: spotiflow_prob_threshold, type: float, label: Spotiflow Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --spotiflow-prob-threshold, cli_order: 26, optional: true, section_id: method, mode: advanced}
+- {name: spotiflow_min_distance, type: integer, label: Spotiflow Minimum Distance, description: Minimum detected-point separation., default: 1, minimum: 1, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: method, mode: advanced}
+- {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Run selected models on first T and a centered maximum 1024x1024 ROI; write only one multichannel label OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 30, optional: true, append_value: true, section_id: benchmark, mode: beginner}
+- name: benchmark_models
+  type: dropdown
+  label: Benchmark Models
+  description: Select all eligible non-Spotiflow checkpoints or any model combination.
+  options:
+  - {label: All eligible models, value: all}
+  - {label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}
+  - {label: Cellpose 3 cyto3, value: 'cellpose3:cyto3'}
+  - {label: Cellpose 3 cyto2 cp3, value: 'cellpose3:cyto2_cp3'}
+  - {label: Cellpose 3 TissueNet cp3, value: 'cellpose3:tissuenet_cp3'}
+  - {label: Cellpose 3 LiveCell cp3, value: 'cellpose3:livecell_cp3'}
+  - {label: Cellpose 3 yeast phase contrast, value: 'cellpose3:yeast_PhC_cp3'}
+  - {label: Cellpose 3 yeast brightfield, value: 'cellpose3:yeast_BF_cp3'}
+  - {label: Cellpose 3 bacteria phase, value: 'cellpose3:bact_phase_cp3'}
+  - {label: Cellpose 3 bacteria fluorescence, value: 'cellpose3:bact_fluor_cp3'}
+  - {label: Cellpose 3 DeepBacs, value: 'cellpose3:deepbacs_cp3'}
+  - {label: Cellpose cyto2, value: 'cellpose3:cyto2'}
+  - {label: Cellpose cyto, value: 'cellpose3:cyto'}
+  - {label: Cellpose CPx, value: 'cellpose3:CPx'}
+  - {label: Cellpose transformer cp3, value: 'cellpose3:transformer_cp3'}
+  - {label: Cellpose NeurIPS default, value: 'cellpose3:neurips_cellpose_default'}
+  - {label: Cellpose NeurIPS transformer, value: 'cellpose3:neurips_cellpose_transformer'}
+  - {label: Cellpose NeurIPS grayscale cyto2, value: 'cellpose3:neurips_grayscale_cyto2'}
+  - {label: Cellpose CP, value: 'cellpose3:CP'}
+  - {label: Cellpose TN1, value: 'cellpose3:TN1'}
+  - {label: Cellpose TN2, value: 'cellpose3:TN2'}
+  - {label: Cellpose TN3, value: 'cellpose3:TN3'}
+  - {label: Cellpose LC1, value: 'cellpose3:LC1'}
+  - {label: Cellpose LC2, value: 'cellpose3:LC2'}
+  - {label: Cellpose LC3, value: 'cellpose3:LC3'}
+  - {label: Cellpose LC4, value: 'cellpose3:LC4'}
+  - {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}
+  - {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}
+  - {label: StarDist foci aggregates, value: 'stardist:SD_Foci_Aggregates'}
+  - {label: StarDist foci Finn, value: 'stardist:SD_Foci_Finn'}
+  - {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}
+  - {label: InstanSeg brightfield nuclei, value: 'instanseg:brightfield_nuclei'}
+  - {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}
+  default: [all]
+  multiselect: true
+  cli_tag: --benchmark-models
+  cli_order: 31
+  optional: true
+  section_id: benchmark
+  mode: beginner

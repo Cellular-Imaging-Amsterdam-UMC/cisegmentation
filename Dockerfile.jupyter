@@ -1,0 +1,12 @@
+ARG BASE_IMAGE=w_cisegmentation:latest
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY requirements_jupyter.txt /app/
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install -r /app/requirements_jupyter.txt
+RUN mkdir -p /app/notebooks \
+    && bilayers_cli generate /app/config.yaml --interface jupyter \
+    && cp /app/dist/jupyter/cisegmentation_inference/generated_notebook.ipynb /app/notebooks/cisegmentation_bilayers.ipynb
+ENV JUPYTER_PORT=8888
+EXPOSE 8888
+ENTRYPOINT ["sh", "-c", "jupyter lab --ip=0.0.0.0 --port=${JUPYTER_PORT:-8888} --no-browser --allow-root --ServerApp.token='' --ServerApp.password='' --notebook-dir=/app/notebooks"]

@@ -1,0 +1,12 @@
+.git
+.gitignore
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+models
+outputs
+dist
+build
+*.egg-info
+tools/omero_import_metadata_probe/reports

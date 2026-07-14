@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.last_launcher_settings.json
+outputs/
+models/
+*.partial
+dist/
+build/
+*.egg-info/
+tools/omero_import_metadata_probe/reports/

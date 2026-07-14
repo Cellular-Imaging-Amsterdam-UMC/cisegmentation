@@ -1,0 +1,15 @@
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.11.0+cu126
+torchvision==0.26.0+cu126
+cellpose==4.1.1
+cellpose3_legacy @ git+https://github.com/Cellular-Imaging-Amsterdam-UMC/cellpose3_legacy.git@5789ad61c99a9e2fc8ea0a404f92d6ea1a6a9cd1
+cistardist-pytorch==0.4.1
+zenodo-get>=2.0,<3
+instanseg-torch==0.1.1
+spotiflow==0.6.5
+numpy>=1.26,<2.1
+zarr>=2.18,<3
+numcodecs>=0.12,<0.16
+PyYAML>=6,<7
+Pillow>=10,<13
+psutil>=5.9

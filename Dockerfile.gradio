@@ -1,0 +1,11 @@
+ARG BASE_IMAGE=w_cisegmentation:latest
+FROM ${BASE_IMAGE}
+WORKDIR /app
+COPY requirements_gradio.txt /app/
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+    && python -m pip install -r /app/requirements_gradio.txt
+RUN bilayers_cli generate /app/config.yaml --interface gradio \
+    && cp /app/dist/gradio/cisegmentation_inference/app.py /app/gradio_app.py
+ENV GRADIO_SERVER_NAME=0.0.0.0 GRADIO_SERVER_PORT=7878 GRADIO_SHARE=false
+EXPOSE 7878
+ENTRYPOINT ["python", "/app/gradio_app.py"]
