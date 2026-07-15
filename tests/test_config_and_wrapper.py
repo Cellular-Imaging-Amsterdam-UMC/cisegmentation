@@ -5,7 +5,15 @@ from wrapper import build_parser
 
 
 def test_bilayers_config_is_structurally_valid():
-    assert validate_config(load_config()) == []
+    config = load_config()
+    assert validate_config(config) == []
+    parameters = {item["name"]: item for item in config["parameters"]}
+    assert "instanseg_pixel_size_um" not in parameters
+    assert parameters["diameter"]["mode"] == "advanced"
+    spot_values = {
+        option["value"] for option in parameters["benchmark_models"]["options"]
+    }
+    assert "spotiflow:general" in spot_values
 
 
 def test_wrapper_accepts_hyphenated_bilayers_parameters():

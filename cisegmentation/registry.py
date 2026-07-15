@@ -113,7 +113,5 @@ def eligible_benchmark_models(target: str, channel_count: int) -> list[ModelSpec
     return [
         spec
         for spec in MODEL_REGISTRY.values()
-        if spec.family != "spotiflow"
-        and target in spec.targets
-        and channel_count >= spec.min_channels
+        if target in spec.targets and channel_count >= spec.min_channels
     ]

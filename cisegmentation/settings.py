@@ -18,7 +18,6 @@ class SegmentationSettings:
     flow_threshold: float = 0.4
     stardist_prob_threshold: float = -1.0
     stardist_nms_threshold: float = -1.0
-    instanseg_pixel_size_um: float = 0.0
     spotiflow_prob_threshold: float = -1.0
     spotiflow_min_distance: int = 1
     benchmark: bool = False

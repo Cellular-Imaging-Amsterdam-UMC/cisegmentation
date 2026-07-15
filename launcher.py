@@ -6,7 +6,16 @@ import subprocess
 import sys
 
 import yaml
+
+if sys.platform == "win32":
+    import ctypes
+
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        "ci.w_cisegmentation.bilayers_launcher"
+    )
+
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -14,7 +23,10 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -22,6 +34,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -29,31 +42,55 @@ from PyQt6.QtWidgets import (
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.yaml"
+ICON = ROOT / "gui" / "icon.svg"
 SETTINGS = ROOT / ".last_launcher_settings.json"
 
 
 class MultiSelectList(QListWidget):
-    def __init__(self, options: list[dict], defaults: object):
+    def __init__(self, options: list[dict], selected: list[str]):
         super().__init__()
-        self.setMaximumHeight(125)
-        selected = set(defaults if isinstance(defaults, list) else [defaults])
+        selected_values = set(selected)
+        self.setMinimumHeight(120)
+        self.setMaximumHeight(160)
         for option in options:
-            item = QListWidgetItem(str(option.get("label", option.get("value"))))
-            item.setData(Qt.ItemDataRole.UserRole, option.get("value"))
+            item = QListWidgetItem(str(option["label"]))
+            item.setData(Qt.ItemDataRole.UserRole, option["value"])
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked
-                if option.get("value") in selected
+                if option["value"] in selected_values
                 else Qt.CheckState.Unchecked
             )
             self.addItem(item)
 
     def values(self) -> list[str]:
         return [
-            str(self.item(i).data(Qt.ItemDataRole.UserRole))
-            for i in range(self.count())
-            if self.item(i).checkState() == Qt.CheckState.Checked
+            str(self.item(index).data(Qt.ItemDataRole.UserRole))
+            for index in range(self.count())
+            if self.item(index).checkState() == Qt.CheckState.Checked
         ]
+
+
+class CollapsiblePanel(QWidget):
+    def __init__(self, title: str):
+        super().__init__()
+        self.toggle = QToolButton(text=title, checkable=True, checked=False)
+        self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.toggle.clicked.connect(self._set_open)
+        self.content = QWidget()
+        self.content.setVisible(False)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.toggle)
+        layout.addWidget(self.content)
+
+    def _set_open(self, opened: bool) -> None:
+        self.toggle.setArrowType(
+            Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow
+        )
+        self.content.setVisible(opened)
+        self.window().adjustSize()
 
 
 def load_config() -> dict:
@@ -95,68 +132,120 @@ class Window(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.widgets: dict[str, QWidget] = {}
-        self.setWindowTitle("CI Segmentation Docker Launcher")
+        self.setWindowTitle("CI Segmentation - Bilayers Launcher")
+        self.setWindowIcon(QIcon(str(ICON)))
+        self.setMinimumWidth(960)
+
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        folders = QFormLayout()
-        layout.addLayout(folders)
+        layout.setSpacing(10)
+
+        title = QLabel("CI Segmentation - Bilayers")
+        title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        folders = QGroupBox("Data folders")
+        folder_form = QFormLayout(folders)
         self.input_path = QLineEdit(str(ROOT / "tests" / "data"))
         self.output_path = QLineEdit(str(ROOT / "outputs"))
-        folders.addRow("Input folder", self._folder_row(self.input_path))
-        folders.addRow("Output folder", self._folder_row(self.output_path))
-        form = QFormLayout()
-        layout.addLayout(form)
-        for parameter in self.config.get("parameters", []):
-            widget = self._widget(parameter)
-            self.widgets[parameter["name"]] = widget
-            form.addRow(parameter.get("label", parameter["name"]), widget)
-        self.gpu = QCheckBox("Use NVIDIA GPU")
+        folder_form.addRow("Input folder:", self._folder_row(self.input_path))
+        folder_form.addRow("Output folder:", self._folder_row(self.output_path))
+        layout.addWidget(folders)
+
+        runtime = QGroupBox("Docker runtime")
+        runtime_form = QFormLayout(runtime)
+        self.gpu = QCheckBox("Expose NVIDIA GPU to container")
         self.gpu.setChecked(True)
-        layout.addWidget(self.gpu)
-        self.preview = QTextEdit()
-        self.preview.setReadOnly(True)
-        self.preview.setMaximumHeight(110)
+        self.gpu.setToolTip("Adds '--gpus all' to the Docker command.")
+        runtime_form.addRow("GPU:", self.gpu)
+        layout.addWidget(runtime)
+
+        parameters = QGroupBox("Parameters")
+        parameter_layout = QVBoxLayout(parameters)
+        main = QWidget()
+        main_grid = self._parameter_grid(main)
+        advanced = CollapsiblePanel("Advanced parameters")
+        advanced_grid = self._parameter_grid(advanced.content, left_margin=18)
+        main_count = advanced_count = 0
+        for spec in self.config.get("parameters", []):
+            widget = self._widget(spec)
+            widget.setToolTip(spec.get("description", ""))
+            label = QLabel(spec.get("label", spec["name"]))
+            label.setToolTip(spec.get("description", ""))
+            label.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            if spec.get("mode") == "advanced":
+                self._add_two_column_row(advanced_grid, advanced_count, label, widget)
+                advanced_count += 1
+            else:
+                self._add_two_column_row(main_grid, main_count, label, widget)
+                main_count += 1
+            self.widgets[spec["name"]] = widget
+        parameter_layout.addWidget(main)
+        if advanced_count:
+            parameter_layout.addWidget(advanced)
+        layout.addWidget(parameters)
+
+        layout.addWidget(QLabel("Command preview:"))
+        self.preview = QTextEdit(readOnly=True)
+        self.preview.setMaximumHeight(125)
+        self.preview.setFont(QFont("Consolas", 9))
         layout.addWidget(self.preview)
+
         buttons = QHBoxLayout()
-        layout.addLayout(buttons)
-        run = QPushButton("Run")
-        run.clicked.connect(self.run)
-        buttons.addWidget(run)
-        save = QPushButton("Save settings")
-        save.clicked.connect(self.save)
-        buttons.addWidget(save)
         restore = QPushButton("Restore settings")
         restore.clicked.connect(self.restore)
         buttons.addWidget(restore)
+        save = QPushButton("Save settings")
+        save.clicked.connect(self.save)
+        buttons.addWidget(save)
+        buttons.addStretch()
+        run = QPushButton("Run")
+        run.clicked.connect(self.run)
+        buttons.addWidget(run)
+        close = QPushButton("Close")
+        close.clicked.connect(self.close)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+
+        self._connect_signals()
         self.refresh()
-        for widget in self.widgets.values():
-            if isinstance(widget, QComboBox):
-                widget.currentIndexChanged.connect(self.refresh)
-            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
-                widget.valueChanged.connect(self.refresh)
-            elif isinstance(widget, QCheckBox):
-                widget.stateChanged.connect(self.refresh)
-            elif isinstance(widget, QLineEdit):
-                widget.textChanged.connect(self.refresh)
-            elif isinstance(widget, MultiSelectList):
-                widget.itemChanged.connect(self.refresh)
+
+    @staticmethod
+    def _parameter_grid(parent: QWidget, left_margin: int = 0) -> QGridLayout:
+        grid = QGridLayout(parent)
+        grid.setContentsMargins(left_margin, 0, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
+        return grid
+
+    @staticmethod
+    def _add_two_column_row(
+        grid: QGridLayout, index: int, label: QLabel, widget: QWidget
+    ) -> None:
+        column = 0 if index % 2 == 0 else 2
+        row = index // 2
+        grid.addWidget(label, row, column)
+        grid.addWidget(widget, row, column + 1)
 
     def _folder_row(self, edit: QLineEdit) -> QWidget:
         box = QWidget()
         row = QHBoxLayout(box)
         row.setContentsMargins(0, 0, 0, 0)
         row.addWidget(edit)
-        button = QPushButton("Browse")
+        button = QPushButton("Browse...")
         button.clicked.connect(lambda: self._browse(edit))
         row.addWidget(button)
         return box
 
-    def _browse(self, edit: QLineEdit):
+    def _browse(self, edit: QLineEdit) -> None:
         selected = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
         if selected:
             edit.setText(selected)
-            self.refresh()
 
     def _widget(self, spec: dict) -> QWidget:
         if spec.get("multiselect"):
@@ -169,8 +258,7 @@ class Window(QMainWindow):
             widget = QComboBox()
             for option in spec["options"]:
                 widget.addItem(str(option["label"]), option["value"])
-            index = widget.findData(spec.get("default"))
-            widget.setCurrentIndex(max(index, 0))
+            widget.setCurrentIndex(max(widget.findData(spec.get("default")), 0))
             return widget
         if spec.get("type") == "integer":
             widget = QSpinBox()
@@ -183,12 +271,28 @@ class Window(QMainWindow):
             widget = QDoubleSpinBox()
             widget.setDecimals(6)
             widget.setRange(
-                float(spec.get("minimum", -999999)), float(spec.get("maximum", 999999))
+                float(spec.get("minimum", -999999)),
+                float(spec.get("maximum", 999999)),
             )
             widget.setValue(float(spec.get("default", 0)))
             return widget
-        widget = QLineEdit(str(spec.get("default", "")))
-        return widget
+        return QLineEdit(str(spec.get("default", "")))
+
+    def _connect_signals(self) -> None:
+        self.input_path.textChanged.connect(self.refresh)
+        self.output_path.textChanged.connect(self.refresh)
+        self.gpu.stateChanged.connect(self.refresh)
+        for widget in self.widgets.values():
+            if isinstance(widget, QComboBox):
+                widget.currentIndexChanged.connect(self.refresh)
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                widget.valueChanged.connect(self.refresh)
+            elif isinstance(widget, QCheckBox):
+                widget.stateChanged.connect(self.refresh)
+            elif isinstance(widget, QLineEdit):
+                widget.textChanged.connect(self.refresh)
+            elif isinstance(widget, MultiSelectList):
+                widget.itemChanged.connect(self.refresh)
 
     def values(self) -> dict:
         values = {}
@@ -214,14 +318,14 @@ class Window(QMainWindow):
             self.gpu.isChecked(),
         )
 
-    def refresh(self):
+    def refresh(self) -> None:
         self.preview.setPlainText(subprocess.list2cmdline(self.command()))
 
-    def run(self):
+    def run(self) -> None:
         self.save()
         subprocess.Popen(self.command(), cwd=ROOT)
 
-    def save(self):
+    def save(self) -> None:
         SETTINGS.write_text(
             json.dumps(
                 {
@@ -235,7 +339,7 @@ class Window(QMainWindow):
             encoding="utf-8",
         )
 
-    def restore(self):
+    def restore(self) -> None:
         if not SETTINGS.exists():
             return
         data = json.loads(SETTINGS.read_text(encoding="utf-8"))
@@ -254,10 +358,11 @@ class Window(QMainWindow):
                 widget.setText(str(value))
             elif isinstance(widget, MultiSelectList):
                 selected = set(value)
-                for i in range(widget.count()):
-                    widget.item(i).setCheckState(
+                for index in range(widget.count()):
+                    item = widget.item(index)
+                    item.setCheckState(
                         Qt.CheckState.Checked
-                        if widget.item(i).data(Qt.ItemDataRole.UserRole) in selected
+                        if item.data(Qt.ItemDataRole.UserRole) in selected
                         else Qt.CheckState.Unchecked
                     )
         self.refresh()
@@ -265,6 +370,7 @@ class Window(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(str(ICON)))
     window = Window()
     window.show()
     return app.exec()

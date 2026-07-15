@@ -12,10 +12,9 @@ def test_requested_custom_stardist_models_are_registered():
     assert get_model_spec("stardist:SD_Foci_Finn").targets == ("foci",)
 
 
-def test_all_foci_benchmark_includes_both_custom_models_and_excludes_spotiflow():
+def test_foci_eligible_models_include_both_custom_models():
     ids = {spec.id for spec in eligible_benchmark_models("foci", 1)}
     assert {"stardist:SD_Foci_Aggregates", "stardist:SD_Foci_Finn"} <= ids
-    assert not any(model_id.startswith("spotiflow:") for model_id in ids)
 
 
 def test_channel_selection_is_one_based_and_validated():

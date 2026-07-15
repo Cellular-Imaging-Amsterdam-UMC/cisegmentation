@@ -172,6 +172,10 @@ def _segment_instanseg(
     settings: SegmentationSettings,
     pixel_size_um: float,
 ) -> np.ndarray:
+    if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
+        raise ValueError(
+            "InstanSeg requires a positive XY pixel size in OME-Zarr metadata"
+        )
     from instanseg import InstanSeg
 
     channels = settings.selected_channels(czyx.shape[0])
@@ -198,10 +202,9 @@ def _segment_instanseg(
         else 0
     )
     planes = []
-    requested_size = settings.instanseg_pixel_size_um or pixel_size_um
     for z_index in range(czyx.shape[1]):
         image = czyx[channels, z_index]
-        labels, _ = model.eval_small_image(image, requested_size)
+        labels, _ = model.eval_small_image(image, pixel_size_um)
         array = np.asarray(labels)
         while array.ndim > 2:
             if array.shape[0] > target_index:
@@ -287,7 +290,7 @@ def segment_czyx(
     elif spec.family == "stardist":
         labels = _segment_stardist(czyx, spec, settings, device)
     elif spec.family == "instanseg":
-        labels = _segment_instanseg(czyx, spec, settings, scales.get("x", 1.0))
+        labels = _segment_instanseg(czyx, spec, settings, scales.get("x", float("nan")))
     elif spec.family == "spotiflow":
         labels = _segment_spotiflow(czyx, spec, settings, device)
     else:

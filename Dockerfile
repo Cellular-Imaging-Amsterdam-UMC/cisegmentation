@@ -16,10 +16,11 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install -r /app/requirements.txt
-COPY cisegmentation/ /app/cisegmentation/
-COPY wrapper.py bilayers_cli.py config.yaml /app/
-COPY tools/download_models.py tools/cuda_smoke.py /app/tools/
+COPY tools/download_models.py /app/tools/download_models.py
 RUN python /app/tools/download_models.py \
     && rm -rf /root/.cache /tmp/*
+COPY cisegmentation/ /app/cisegmentation/
+COPY wrapper.py bilayers_cli.py config.yaml /app/
+COPY tools/cuda_smoke.py /app/tools/cuda_smoke.py
 RUN mkdir -p /data/in /data/out
 ENTRYPOINT ["python", "/app/wrapper.py"]

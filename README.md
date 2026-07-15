@@ -39,8 +39,15 @@ python wrapper.py --infolder tests/data --outfolder outputs `
 ```
 
 Benchmark mode selects the first input/field and first timepoint, center-crops
-XY to at most 1024×1024, retains full Z, and writes one multichannel label
-OME-Zarr. Each successful model is stored as a separately named label channel.
+XY to at most 1024×1024, and writes one rendered 2D XY RGB OME-Zarr montage.
+Like the QuPath extension gallery, it places input projections above colored
+segmentation results and includes model names, object counts, runtimes, skips,
+and failures in the image. The `all` preset also includes every Spotiflow model.
+
+The optional advanced **Model Input Channels** field accepts comma-separated,
+one-based channel numbers in the exact order a multiplexed model should receive
+them. Leave it empty for the normal Primary Channel plus optional Nuclei Channel
+mapping. InstanSeg always reads pixel size from the OME-Zarr metadata.
 
 ## Models
 
