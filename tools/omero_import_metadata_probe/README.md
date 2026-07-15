@@ -5,6 +5,24 @@ This runner uses the established `omero_import_metadata_probe` from the local
 OMERO and BIOMERO import paths. The existing probe remains the source of truth
 for importer-container access, metadata comparison, cleanup, and reports.
 
+`omero_import_metadata_probe.py` is a local compatibility shim around that
+probe. It permits OMERO label channels without an assigned rendering color;
+the color is omitted from generated OME-XML instead of failing during export.
+It also forces NGFF 0.4 exports to use Zarr v2 because the current probe's
+Zarr dependency otherwise defaults to Zarr v3, which Bio-Formats 8.4 and
+QuPath 0.7 cannot display. The shim also writes the NGFF `_ARRAY_DIMENSIONS`
+attribute required for Bio-Formats to identify the axes.
+OMERO length-unit enum names such as `MICROMETER` are converted to valid
+OME-XML unit symbols such as `µm`.
+
+For registered Zarr input, `--retain-container-staging` keeps a host-staged
+store available after registration. The roundtrip runner uses this because
+OMERO references that path lazily, and removes it only after successful export
+and OMERO cleanup.
+Copied inputs are placed below `/data/.cisegmentation_roundtrip`, a mount shared
+by the importer and OMERO Server containers; container-private `/tmp` paths
+cannot serve registered Zarr pixels to OMERO.
+
 Prerequisites:
 
 - The local NL-BIOMERO Docker stack is running.

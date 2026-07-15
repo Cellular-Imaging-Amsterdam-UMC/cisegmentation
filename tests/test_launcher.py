@@ -40,6 +40,20 @@ def test_local_and_docker_commands_share_workflow_parameters():
     assert "w_cisegmentation:latest" in docker
     assert "cellularimagingcf/w_cisegmentation:latest" not in docker
     assert docker[docker.index("--model") + 1] == "stardist:SD_Foci_Finn"
+    assert local[local.index("--multi-step") + 1] == "False"
+
+
+def test_launcher_serializes_disabled_default_true_multistep_steps():
+    config = load_config()
+    values = {
+        item["name"]: item.get("default") for item in config.get("parameters", [])
+    }
+    values.update({"multi_step": True, "cell_step": False, "spot_channels": "2,2"})
+    command = build_local_command(
+        config, values, "inputfolder", "outputfolder", "python-test"
+    )
+    assert command[command.index("--cell-step") + 1] == "False"
+    assert command[command.index("--spot-channels") + 1] == "2,2"
 
 
 def test_launcher_exposes_both_run_buttons():

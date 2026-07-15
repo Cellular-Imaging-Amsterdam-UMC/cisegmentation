@@ -12,6 +12,14 @@ if str(ROOT) not in sys.path:
 from cisegmentation.roundtrip import DEFAULT_BIOMERO_ROOT, RoundtripRunner
 
 
+def configure_console_encoding() -> None:
+    """Use a deterministic codec for Unicode emitted by OMERO/BIOMERO."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the local OMERO-BIOMERO-Slurm roundtrip")
     parser.add_argument("--input-dir", required=True, type=Path)
@@ -24,6 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_console_encoding()
     args = build_parser().parse_args(argv)
     parameters = json.loads(args.parameters_json)
     if not isinstance(parameters, dict):

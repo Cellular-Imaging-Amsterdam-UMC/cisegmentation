@@ -2,16 +2,54 @@ import numpy as np
 import pytest
 
 from cisegmentation.adapters import (
+    _cached_model,
     _cellpose_diameter_pixels,
     _segment_instanseg,
     _spotiflow_min_distance_pixels,
     _stardist_versatile_input,
+    clear_model_cache,
     points_to_labels,
 )
 from cisegmentation.registry import get_model_spec
 from cisegmentation.benchmark import _benchmark_specs, center_crop, run_benchmark
 from cisegmentation.ome_zarr_io import enumerate_resources, read_image
 from cisegmentation.settings import SegmentationSettings
+
+
+def test_process_model_cache_is_keyed_by_model_and_device():
+    clear_model_cache()
+    imports = []
+    constructions = []
+
+    def importer():
+        imports.append(True)
+        return object()
+
+    def constructor(imported):
+        constructions.append(imported)
+        return object()
+
+    first, first_timing = _cached_model(
+        "cellpose3:cyto3", "cuda", importer, constructor
+    )
+    second, second_timing = _cached_model(
+        "cellpose3:cyto3", "cuda", importer, constructor
+    )
+    cpu, cpu_timing = _cached_model(
+        "cellpose3:cyto3", "cpu", importer, constructor
+    )
+
+    assert first is second
+    assert cpu is not first
+    assert len(imports) == len(constructions) == 2
+    assert not first_timing["model_cache_hit"]
+    assert second_timing == {
+        "model_cache_hit": True,
+        "import_seconds": 0.0,
+        "model_load_seconds": 0.0,
+    }
+    assert not cpu_timing["model_cache_hit"]
+    clear_model_cache()
 
 
 def test_spotiflow_points_are_unique_single_pixels():

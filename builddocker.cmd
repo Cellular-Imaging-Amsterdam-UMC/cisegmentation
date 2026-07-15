@@ -25,5 +25,9 @@ if errorlevel 1 (
 )
 docker build %* --build-arg MODEL_CACHE_IMAGE=w_cisegmentation-model-cache:%MODEL_CACHE_ID% -t w_cisegmentation:%VERSION% -t w_cisegmentation:latest .
 set "EXITCODE=%ERRORLEVEL%"
+if "%EXITCODE%"=="0" (
+  "%PYTHON_EXE%" tools\docker_build_state.py record --image w_cisegmentation:latest
+  set "EXITCODE=%ERRORLEVEL%"
+)
 popd
 endlocal & exit /b %EXITCODE%

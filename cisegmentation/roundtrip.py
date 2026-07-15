@@ -4,7 +4,7 @@ import configparser
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import shutil
@@ -24,6 +24,77 @@ DEFAULT_IMPORTER = "deployment_scenarios-biomero-importer-1"
 DEFAULT_SERVER = "deployment_scenarios-omeroserver-1"
 DEFAULT_WORKER = "deployment_scenarios-biomeroworker-1"
 DEFAULT_SLURM = "slurmctld"
+DOCKER_BUILD_STATE = ".docker-build-state.json"
+
+
+def docker_source_id(root: str | Path) -> str:
+    root = Path(root).resolve()
+    marker = root / "models" / ".complete.json"
+    inputs = [
+        root / "Dockerfile",
+        root / "Dockerfile.models",
+        root / "requirements.txt",
+        root / "config.yaml",
+        root / "wrapper.py",
+        root / "bilayers_cli.py",
+        root / "tools" / "download_models.py",
+        root / "tools" / "cuda_smoke.py",
+    ]
+    inputs += sorted((root / "bundled_models").rglob("*"))
+    inputs.append(marker)
+    inputs = [path for path in inputs if path.is_file()]
+    inputs += sorted(
+        path
+        for path in (root / "cisegmentation").rglob("*")
+        if path.is_file()
+        and path.name != "roundtrip.py"
+        and "__pycache__" not in path.parts
+    )
+    digest = hashlib.sha256()
+    for path in inputs:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+    return "sha256:" + digest.hexdigest()
+
+
+def docker_build_state_matches(
+    state: dict[str, Any] | None, source_id: str, image_id: str
+) -> bool:
+    return bool(
+        state
+        and state.get("source_id") == source_id
+        and state.get("image_id") == image_id
+    )
+
+
+def read_docker_build_state(root: str | Path) -> dict[str, Any] | None:
+    path = Path(root) / DOCKER_BUILD_STATE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def write_docker_build_state(
+    root: str | Path, source_id: str, image_id: str, image: str
+) -> None:
+    path = Path(root) / DOCKER_BUILD_STATE
+    temporary = path.with_suffix(path.suffix + ".partial")
+    temporary.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "source_id": source_id,
+                "image_id": image_id,
+                "image": image,
+                "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    temporary.replace(path)
 
 
 def first_ome_zarr(folder: str | Path) -> Path:
@@ -203,6 +274,7 @@ class RoundtripRunner:
         self.biomero_root = biomero_root
         self.timeout = timeout
         self.emit = emit
+        self.started_monotonic = time.monotonic()
         self.run_id = time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}"
         self.log_dir = self.output_dir / "logs" / self.run_id
         self.summary: dict[str, Any] = {
@@ -218,6 +290,17 @@ class RoundtripRunner:
         self.slurm_job_id: str | None = None
         self.process_id: str | None = None
 
+    def _emit(self, line: str) -> None:
+        """Emit progress without allowing a console codec to abort the run.
+
+        Command logs are always written as UTF-8.  The fallback only affects the
+        live Windows console/QProcess display when it uses a legacy code page.
+        """
+        try:
+            self.emit(line)
+        except UnicodeEncodeError:
+            self.emit(line.encode("ascii", errors="replace").decode("ascii"))
+
     def _password(self) -> str:
         if os.environ.get("OMERO_ROOT_PASSWORD"):
             return os.environ["OMERO_ROOT_PASSWORD"]
@@ -230,7 +313,7 @@ class RoundtripRunner:
 
     def phase(self, name: str) -> None:
         self.summary["phase"] = name
-        self.emit(f"PHASE: {name}")
+        self._emit(f"PHASE: {name}")
         self._write_summary()
 
     def run_cmd(
@@ -240,10 +323,14 @@ class RoundtripRunner:
         *,
         timeout: int | None = None,
         env: dict[str, str] | None = None,
+        heartbeat: str | None = None,
+        on_line: Callable[[str], None] | None = None,
+        echo_output: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         safe = redact(subprocess.list2cmdline(command), [self.password])
-        self.emit(f"$ {safe}")
+        if echo_output:
+            self._emit(f"$ {safe}")
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
@@ -251,6 +338,8 @@ class RoundtripRunner:
             command,
             cwd=self.root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=merged_env,
@@ -260,17 +349,21 @@ class RoundtripRunner:
         pending: queue.Queue[str | None] = queue.Queue()
 
         def reader() -> None:
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                pending.put(line)
-            pending.put(None)
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    pending.put(line)
+            finally:
+                pending.put(None)
 
         threading.Thread(target=reader, daemon=True).start()
-        deadline = time.monotonic() + timeout if timeout else None
+        command_started = time.monotonic()
+        deadline = command_started + timeout if timeout else None
         log_path = self.log_dir / log_name
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(f"$ {safe}\n\n")
             finished = False
+            last_heartbeat = time.monotonic()
             while not finished:
                 if deadline is not None and time.monotonic() > deadline:
                     proc.kill()
@@ -278,6 +371,14 @@ class RoundtripRunner:
                 try:
                     line = pending.get(timeout=0.2)
                 except queue.Empty:
+                    if heartbeat and time.monotonic() - last_heartbeat >= 30:
+                        elapsed = int(time.monotonic() - command_started)
+                        status = f"{heartbeat} ({elapsed}s elapsed)"
+                        log_file.write(f"# {status}\n")
+                        log_file.flush()
+                        if echo_output:
+                            self._emit(status)
+                        last_heartbeat = time.monotonic()
                     if proc.poll() is not None and pending.empty():
                         break
                     continue
@@ -288,7 +389,10 @@ class RoundtripRunner:
                 lines.append(safe_line)
                 log_file.write(safe_line)
                 log_file.flush()
-                self.emit(safe_line.rstrip("\r\n"))
+                if echo_output:
+                    self._emit(safe_line.rstrip("\r\n"))
+                if on_line:
+                    on_line(safe_line)
         return_code = proc.wait()
         output = "".join(lines)
         if return_code:
@@ -338,43 +442,56 @@ class RoundtripRunner:
                 "docker_model_cache_build.log",
                 timeout=self.timeout,
             )
+        source_id = docker_source_id(self.root)
+        image_name = "w_cisegmentation:latest"
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image_name],
+            cwd=self.root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=False,
+        )
+        metadata = json.loads(inspect.stdout)[0] if inspect.returncode == 0 else None
+        if metadata and docker_build_state_matches(
+            read_docker_build_state(self.root),
+            source_id,
+            str(metadata.get("Id", "")),
+        ):
+            self._emit(
+                "Local Docker image matches the current workflow source; build skipped."
+            )
+            self.summary["docker_build_reused"] = True
+            return {
+                "version": version,
+                "tag": "latest",
+                "image_id": str(metadata.get("Id", "")),
+                "content_id": source_id,
+            }
         self.run_cmd(
             ["docker", "build", "--build-arg", f"MODEL_CACHE_IMAGE={cache_image}", "-t", f"w_cisegmentation:{version}", "-t", "w_cisegmentation:latest", "."],
             "docker_build.log",
             timeout=self.timeout,
         )
-        inspect = self.run_cmd(
-            ["docker", "image", "inspect", "w_cisegmentation:latest"],
-            "docker_inspect.log",
-        ).stdout
-        metadata = json.loads(inspect)[0]
-        digest = hashlib.sha256()
-        inputs = [
-            self.root / "Dockerfile",
-            self.root / "Dockerfile.models",
-            self.root / "requirements.txt",
-            self.root / "config.yaml",
-            self.root / "wrapper.py",
-            self.root / "bilayers_cli.py",
-            self.root / "tools" / "download_models.py",
-            self.root / "tools" / "cuda_smoke.py",
-        ]
-        inputs += sorted((self.root / "bundled_models").rglob("*"))
-        inputs.append(marker)
-        inputs = [path for path in inputs if path.is_file()]
-        inputs += sorted(
-            path for path in (self.root / "cisegmentation").rglob("*")
-            if path.is_file() and path.name != "roundtrip.py" and "__pycache__" not in path.parts
+        inspect = subprocess.run(
+            ["docker", "image", "inspect", image_name],
+            cwd=self.root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            check=True,
         )
-        for path in inputs:
-            digest.update(path.relative_to(self.root).as_posix().encode("utf-8") + b"\0")
-            digest.update(path.read_bytes())
-        content_id = "sha256:" + digest.hexdigest()
+        metadata = json.loads(inspect.stdout)[0]
+        image_id = str(metadata.get("Id", ""))
+        write_docker_build_state(self.root, source_id, image_id, image_name)
+        self.summary["docker_build_reused"] = False
         return {
             "version": version,
             "tag": "latest",
-            "image_id": str(metadata.get("Id", "")),
-            "content_id": content_id,
+            "image_id": image_id,
+            "content_id": source_id,
         }
 
     def _register(self, commit: str) -> bool:
@@ -422,7 +539,7 @@ class RoundtripRunner:
             ["docker", "exec", DEFAULT_SLURM, "test", "-s", sif]
         ).returncode == 0
         if exists and image_manifest_matches(identity, remote_manifest):
-            self.emit("Slurm SIF already matches the local Docker image; conversion skipped.")
+            self._emit("Slurm SIF already matches the local Docker image; conversion skipped.")
             self.summary["sif_reused"] = True
             return
         if (
@@ -533,12 +650,17 @@ o={model}(); o.setName(rstring(os.environ['OBJECT_NAME'])); o=c.getUpdateService
 """
         return int(self._container_python(code, {"OMERO_PASSWORD": self.password, "OBJECT_NAME": name}, f"create_{kind.lower()}.log"))
 
-    def _probe(self, args: list[str], log: str) -> dict[str, Any]:
+    def _probe(
+        self, args: list[str], log: str, *, retain_staging: bool = False
+    ) -> dict[str, Any]:
         probe = self.root / "tools" / "omero_import_metadata_probe" / "omero_import_metadata_probe.py"
         if not probe.exists():
             probe = Path(r"C:\rahoebe\Python\cideconvolve\tools\omero_import_metadata_probe\omero_import_metadata_probe.py")
         report = self.log_dir / (Path(log).stem + "_report")
-        command = [sys.executable, str(probe), "--importer-container", DEFAULT_IMPORTER, "--user", "root", "--group", "system", *args, "--out", str(report)]
+        command = [sys.executable, str(probe), "--importer-container", DEFAULT_IMPORTER, "--user", "root", "--group", "system", *args]
+        if retain_staging:
+            command.append("--retain-container-staging")
+        command += ["--out", str(report)]
         self.run_cmd(command, log, timeout=self.timeout, env={"OMERO_ROOT_PASSWORD": self.password})
         return json.loads((report / "report.json").read_text(encoding="utf-8"))
 
@@ -583,18 +705,41 @@ o={model}(); o.setName(rstring(os.environ['OBJECT_NAME'])); o=c.getUpdateService
             cli, "-s", "localhost", "-u", "root", "-g", "system", "script", "launch", script_id,
             *self._workflow_args(data_type, object_id, target_kind, target_id),
         ]
-        proc = self.run_cmd(command, "biomero_workflow.log", timeout=self.timeout)
+        def capture_identifiers(line: str) -> None:
+            execution = re.search(
+                r"(?:execution(?:[_ ]id)?|workflow(?:[_ ]id)?)\D+"
+                r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b",
+                line,
+                re.I,
+            )
+            process = re.search(r"\bJob\s+(\d+)\s+ready\b", line, re.I) or re.search(
+                r"\bprocess[_ ]id\D+(\d+)", line, re.I
+            )
+            job = re.search(r"\bSubmitted\b.*?\bas batch job\s+(\d+)\b", line, re.I) or re.search(
+                r"\bSubmitted batch job\s+(\d+)\b", line, re.I
+            )
+            if execution and "biomero_execution_id" not in self.summary:
+                execution_id = execution.group(1)
+                self.summary["biomero_execution_id"] = execution_id
+                self._emit(f"BIOMERO_EXECUTION_ID: {execution_id}")
+            if process and not self.process_id:
+                self.process_id = process.group(1)
+                self.summary["omero_process_id"] = self.process_id
+                self._emit(f"OMERO_PROCESS_ID: {self.process_id}")
+            if job and self.slurm_job_id != job.group(1):
+                self.slurm_job_id = job.group(1)
+                self.summary["slurm_job_id"] = self.slurm_job_id
+                self._emit(f"SLURM_JOB_ID: {self.slurm_job_id}")
+
+        proc = self.run_cmd(
+            command,
+            "biomero_workflow.log",
+            timeout=self.timeout,
+            heartbeat="Waiting for BIOMERO analysis and OMERO result import…",
+            on_line=capture_identifiers,
+        )
         output = (proc.stdout or "") + (proc.stderr or "")
-        process = re.search(r"(?:process|Process)\D+(\d+)", output)
-        job = re.search(r"(?:Submitted batch job|job[_ ]id\D+)(\d+)", output, re.I)
-        if process:
-            self.process_id = process.group(1)
-            self.summary["omero_process_id"] = self.process_id
-            self.emit(f"OMERO_PROCESS_ID: {self.process_id}")
-        if job:
-            self.slurm_job_id = job.group(1)
-            self.summary["slurm_job_id"] = self.slurm_job_id
-            self.emit(f"SLURM_JOB_ID: {self.slurm_job_id}")
+        capture_identifiers(output)
 
     def _children(self, kind: str, parent_id: int) -> list[int]:
         code = """
@@ -611,6 +756,46 @@ print(','.join(map(str,ids))); c.close()
 """
         raw = self._container_python(code, {"OMERO_PASSWORD": self.password, "KIND": kind, "PARENT": str(parent_id)}, "query_results.log")
         return [int(item) for item in raw.split(",") if item.strip().isdigit()]
+
+    def _apply_label_lut(self, kind: str, result_ids: list[int]) -> None:
+        """Apply OMERO's black-background Glasbey LUT to imported results."""
+        image_ids = result_ids
+        if kind == "Screen":
+            image_ids = [
+                int(field["image_id"])
+                for plate_id in result_ids
+                for field in self._plate_fields(plate_id)
+            ]
+        code = """
+import os
+from omero.gateway import BlitzGateway
+c=BlitzGateway('root',os.environ['OMERO_PASSWORD'],host='omeroserver',port=4064); assert c.connect()
+g=c.getObject('ExperimenterGroup',attributes={'name':'system'}); c.setGroupForSession(g.getId())
+updated=[]
+for image_id in [int(value) for value in os.environ['IMAGE_IDS'].split(',') if value]:
+ image=c.getObject('Image',image_id)
+ if image is None: continue
+ channels=image.getChannels()
+ active=list(range(1,len(channels)+1))
+ windows=[[channel.getWindowStart(),channel.getWindowEnd()] for channel in channels]
+ image.set_active_channels(active,windows=windows,colors=['glasbey_inverted.lut']*len(channels))
+ image.saveDefaults(); updated.append(image_id)
+print(','.join(map(str,updated))); c.close()
+"""
+        updated = self._container_python(
+            code,
+            {
+                "OMERO_PASSWORD": self.password,
+                "IMAGE_IDS": ",".join(map(str, image_ids)),
+            },
+            "apply_glasbey_lut.log",
+        )
+        updated_ids = [int(value) for value in updated.split(",") if value.strip().isdigit()]
+        if sorted(updated_ids) != sorted(image_ids):
+            raise CommandError(
+                f"Could not apply Glasbey LUT to every OMERO result image: expected {image_ids}, updated {updated_ids}"
+            )
+        self.summary["result_lookup_table"] = "glasbey_inverted.lut"
 
     def _export_results(self, kind: str, result_ids: list[int]) -> list[Path]:
         exported: list[Path] = []
@@ -697,18 +882,29 @@ print(json.dumps(out)); c.close()
 
     def _collect_slurm_logs(self) -> None:
         job = self.slurm_job_id or ""
+        # Restrict container logs to this roundtrip and keep their verbose,
+        # potentially Unicode-rich contents in UTF-8 files instead of the UI.
+        since_seconds = max(60, int(time.monotonic() - self.started_monotonic) + 60)
         commands = {
             "sacct.txt": f"sacct -j {shlex.quote(job)} --format=JobID,JobName,State,ExitCode,Elapsed,NodeList -P" if job else "sacct -S today --name cisegmentation -X -P | tail -50",
             "scontrol.txt": f"scontrol show job {shlex.quote(job)}" if job else "squeue -a",
         }
         for name, command in commands.items():
             try:
-                self.run_cmd(["docker", "exec", DEFAULT_SLURM, "bash", "-lc", command], name)
+                self.run_cmd(
+                    ["docker", "exec", DEFAULT_SLURM, "bash", "-lc", command],
+                    name,
+                    echo_output=False,
+                )
             except Exception as exc:
                 (self.log_dir / name).write_text(str(exc), encoding="utf-8")
         for container, name in ((DEFAULT_SERVER, "omero_server.log"), (DEFAULT_WORKER, "biomero_worker.log"), (DEFAULT_IMPORTER, "importer.log")):
             try:
-                self.run_cmd(["docker", "logs", "--since", "8h", container], name)
+                self.run_cmd(
+                    ["docker", "logs", "--since", f"{since_seconds}s", container],
+                    name,
+                    echo_output=False,
+                )
             except Exception as exc:
                 (self.log_dir / name).write_text(str(exc), encoding="utf-8")
 
@@ -725,6 +921,37 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
         if result != "deleted":
             raise CommandError(f"OMERO {kind}:{object_id} still exists after cleanup")
 
+    def _delete_probe_staging(self, container_path: str) -> None:
+        path = PurePosixPath(container_path)
+        parent = path.parent
+        staging_roots = {
+            PurePosixPath("/tmp/cideconvolve_omero_probe"),
+            PurePosixPath("/data/.cisegmentation_roundtrip"),
+        }
+        if parent.parent not in staging_roots or not re.fullmatch(r"[0-9a-f]{32}", parent.name):
+            raise CommandError(f"Refusing to remove unsafe probe staging path: {container_path}")
+        self.run_cmd(
+            [
+                "docker",
+                "exec",
+                "-u",
+                "0",
+                DEFAULT_IMPORTER,
+                "rm",
+                "-rf",
+                "--",
+                str(parent),
+            ],
+            "delete_probe_staging.log",
+            timeout=120,
+        )
+        exists = subprocess.run(
+            ["docker", "exec", DEFAULT_IMPORTER, "test", "-e", str(parent)],
+            check=False,
+        ).returncode == 0
+        if exists:
+            raise CommandError(f"Probe staging path still exists after cleanup: {parent}")
+
     def _write_summary(self) -> None:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         safe = json.loads(redact(json.dumps(self.summary), [self.password]))
@@ -740,7 +967,7 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
             store = first_ome_zarr(self.input_dir)
             hcs = is_hcs_store(store)
             self.summary.update({"input": str(store), "is_hcs": hcs})
-            self.phase("preflight and Docker build")
+            self.phase("preflight and Docker image check")
             commit, dirty = self._git()
             build = self._build()
             descriptor_hash = hashlib.sha256((self.root / "config.yaml").read_bytes()).hexdigest()
@@ -766,7 +993,19 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
             self.summary["temporary_omero"] = {"kind": parent_kind, "input": input_parent, "output": output_parent}
 
             self.phase("import input OME-Zarr")
-            import_report = self._probe(["--input", str(store), "--target", f"{parent_kind}:{input_parent}", "--mode", "biomero", "--cleanup", "never"], "input_import.log")
+            import_report = self._probe(
+                ["--input", str(store), "--target", f"{parent_kind}:{input_parent}", "--mode", "biomero", "--cleanup", "never"],
+                "input_import.log",
+                retain_staging=True,
+            )
+            container_input = import_report.get("container_input", {})
+            staging_path = (
+                str(container_input.get("container_path", ""))
+                if container_input.get("method") == "docker_cp_to_tmp"
+                else ""
+            )
+            if staging_path:
+                self.summary["temporary_probe_staging"] = staging_path
             imported = self._imported_ids(import_report, data_type)
             if not imported:
                 raise CommandError(f"Input import returned no OMERO {data_type} IDs")
@@ -781,6 +1020,16 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
                 raise CommandError(f"BIOMERO completed without importing results into {parent_kind}:{output_parent}")
             self.summary["result_object_ids"] = result_ids
 
+            benchmark = str(self.parameters.get("benchmark", False)).lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if not benchmark:
+                self.phase("apply OMERO label lookup table")
+                self._apply_label_lut(parent_kind, result_ids)
+
             self.phase("export OMERO results")
             results = self._export_results(parent_kind, result_ids)
             self.summary["result_paths"] = [str(path) for path in results]
@@ -790,6 +1039,9 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
             self.phase("delete temporary OMERO objects")
             for kind, object_id in reversed(containers):
                 self._delete_container(kind, object_id)
+            if staging_path:
+                self._delete_probe_staging(staging_path)
+                self.summary["temporary_probe_staging_cleanup"] = "verified"
             self.summary["cleanup"] = "verified"
             success = True
             self.summary["status"] = "success"
@@ -802,7 +1054,7 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
             self.summary["status"] = "failed"
             self.summary["error"] = str(exc)
             self.summary["cleanup"] = "retained"
-            self.emit(f"ERROR: {exc}")
+            self._emit(f"ERROR: {exc}")
             return 1
         finally:
             if not success:

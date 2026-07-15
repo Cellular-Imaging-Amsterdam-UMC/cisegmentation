@@ -13,6 +13,16 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["diameter"]["mode"] == "advanced"
     assert parameters["diameter"]["minimum"] == -1.0
     assert parameters["spotiflow_min_distance"]["type"] == "float"
+    assert parameters["multi_step"]["type"] == "checkbox"
+    assert parameters["spot_channels"]["default"] == "2"
+    assert parameters["remove_border_cells"]["default"] is False
+    spot_models = {option["value"] for option in parameters["spot_model"]["options"]}
+    assert {
+        "stardist:SD_Foci_Aggregates",
+        "stardist:SD_Foci_Finn",
+        "cellpose3:bact_phase_cp3",
+        "cellpose3:bact_fluor_cp3",
+    } <= spot_models
     benchmark = parameters["benchmark_models"]
     assert benchmark["multiselect"] is False
     assert [option["value"] for option in benchmark["options"]] == [

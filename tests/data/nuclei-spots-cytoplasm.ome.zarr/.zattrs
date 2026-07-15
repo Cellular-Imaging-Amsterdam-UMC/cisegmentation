@@ -1,0 +1,74 @@
+{
+  "omero" : {
+    "version" : "0.4",
+    "channels" : [ {
+      "active" : true,
+      "family" : "linear",
+      "coefficient" : 1.0,
+      "color" : "0000FF",
+      "inverted" : false,
+      "label" : "Nuclei",
+      "window" : {
+        "start" : 0.0,
+        "end" : 32767.0,
+        "min" : 0.0,
+        "max" : 32767.0
+      }
+    }, {
+      "active" : true,
+      "family" : "linear",
+      "coefficient" : 1.0,
+      "color" : "00FF00",
+      "inverted" : false,
+      "label" : "Spots",
+      "window" : {
+        "start" : 0.0,
+        "end" : 32767.0,
+        "min" : 0.0,
+        "max" : 32767.0
+      }
+    }, {
+      "active" : true,
+      "family" : "linear",
+      "coefficient" : 1.0,
+      "color" : "FF0000",
+      "inverted" : false,
+      "label" : "Cytoplasm",
+      "window" : {
+        "start" : 0.0,
+        "end" : 32767.0,
+        "min" : 0.0,
+        "max" : 32767.0
+      }
+    } ],
+    "rdefs" : {
+      "defaultT" : 0,
+      "defaultZ" : 0,
+      "model" : "color"
+    },
+    "name" : "lipids.ome.tif"
+  },
+  "multiscales" : [ {
+    "version" : "0.4",
+    "datasets" : [ {
+      "path" : "0",
+      "coordinateTransformations" : [ {
+        "scale" : [ 1.0, 0.18037517, 0.18037517 ],
+        "type" : "scale"
+      } ]
+    } ],
+    "name" : "lipids.ome.tif",
+    "axes" : [ {
+      "name" : "c",
+      "type" : "channel"
+    }, {
+      "unit" : "micrometer",
+      "name" : "y",
+      "type" : "space"
+    }, {
+      "unit" : "micrometer",
+      "name" : "x",
+      "type" : "space"
+    } ]
+  } ]
+}

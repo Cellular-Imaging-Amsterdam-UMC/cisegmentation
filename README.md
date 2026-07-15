@@ -8,7 +8,9 @@ environment.
 ## Workflow contract
 
 - Input: one or more top-level `.ome.zarr` stores in `/data/in`, including HCS plates.
-- Normal output: standalone `uint32` label OME-Zarrs in `/data/out`.
+- Normal output: standalone nonnegative `int32` label OME-Zarrs in `/data/out`.
+  Signed 32-bit storage preserves instance IDs while remaining readable by
+  QuPath 0.7.0, whose Bio-Formats image server rejects `uint32` tiles.
 - Benchmark output: **only** `benchmark_gallery_<image>.ome.zarr`.
 - Axes are normalized to `TCZYX`; time and Z are preserved in normal runs.
 - Spotiflow points become uniquely numbered single pixels or voxels.
@@ -66,6 +68,12 @@ converted internally using the OME-Zarr XY scale metadata.
 | Segmentation Target (`--target`) | Required biological output: nuclei, cells, foci, or spots. The selected model must support it. |
 | Primary Channel (`--primary-channel`) | Main signal channel. |
 | Nuclei Channel (`--nuclei-channel`) | Optional nuclei channel for cell models; `0` means none. The InstanSeg brightfield model automatically consumes the first three channels. |
+| Multi-step Segmentation (`--multi-step`) | Enables the optional cell, nucleus, and repeated spot-channel pipeline. The original Model/Target/Primary Channel fields are used only when this is off. |
+| Segment Cells / Cell Model / Cell Signal Channel | Runs a cell model using its one-based primary signal channel and optional Cell-step Nuclei Channel (`0` means none). |
+| Segment Nuclei / Nucleus Model / Nucleus Signal Channel | Independently segments nuclei. When the cell step is also enabled, nuclei are matched to cells by overlap; the largest nucleus is retained and cells without nuclei are removed. |
+| Segment Spots/Foci / Spot/Foci Model / Spot Channels | Runs a Spotiflow model, either `SD_Foci_*` StarDist model, or a Cellpose 3 checkpoint containing `bact` once per comma-separated one-based channel. Entries are not deduplicated, so `2,2` creates two label channels. StarDist channels are named `foci`, Cellpose bacterial channels are named `bacteria`, and a Cellpose diameter of `0` uses the bacterial model default. |
+| Derive Cytoplasm (`--derive-cytoplasm`) | Adds a cytoplasm channel containing matched cell masks minus their matched nucleus masks. Cell, nucleus, and cytoplasm gray-value IDs correspond. |
+| Remove Border Cells (`--remove-border-cells`) | Removes cells touching an XY image edge and propagates removal to matched nuclei and derived cytoplasm. Z-stack endpoints are not treated as image borders. |
 | Compute Device (`--device`) | `auto` selects CUDA when available; `cuda` requires a GPU; `cpu` forces CPU inference. |
 | Dimension Mode (`--dimension-mode`) | `auto` uses native 3D where supported; `slice-2d` independently segments and relabels every Z plane. |
 | Cellpose Diameter (`--diameter`) | Object diameter in µm, converted using mean XY pixel size. `0` resolves to 12 µm for nuclei or 25 µm for cells; a negative value uses the model default. |
@@ -86,6 +94,29 @@ and 0.5 µm/px matches the detection resolution in the
 [official QuPath StarDist example](https://qupath.readthedocs.io/en/latest/docs/deep/stardist.html).
 Other StarDist checkpoints retain their native input scale.
 InstanSeg always reads pixel size directly from OME-Zarr metadata.
+
+Normal label outputs store one channel per result type and use a rendering
+window from zero through that channel's maximum label gray value. The metadata
+requests OMERO's `glasbey_inverted.lut`; its value zero is black. Because NGFF
+0.4 does not standardize LUT selection, non-OMERO readers also receive
+non-black semantic fallback colors. The launcher OMERO roundtrip explicitly
+applies and saves the Glasbey LUT after BIOMERO imports each result.
+
+## Performance and timing provenance
+
+Loaded models are cached for the lifetime of one `wrapper.py` process using
+the stable model ID and resolved device as the key. Repeated timepoints, plate
+fields, and input images therefore reuse the same Cellpose, StarDist,
+InstanSeg, or Spotiflow model without deserializing it or transferring it to
+the device again. Separate workflow invocations remain isolated.
+
+Each regular output records `model_cache_hits`, `model_cache_misses`, and a
+`timings` object in its root `cisegmentation` metadata. Plate outputs aggregate
+these values at the plate root while retaining per-field provenance. Timing
+fields are `startup_seconds`, `zarr_read_seconds`, `import_seconds`,
+`device_setup_seconds`, `model_load_seconds`, `inference_seconds`,
+`zarr_write_seconds`, and `total_seconds`. Benchmark run records contain their
+per-model import, load, inference, and cache information as well.
 
 ## Models
 
@@ -119,8 +150,15 @@ The images are tagged `w_cisegmentation:<version>`,
 
 ## OMERO round trip
 
-The scripts under `tools/omero_import_metadata_probe` reuse the same local
-OMERO/BIOMERO probe contract as `cideconvolve`: export an image or plate to the
-Slurm-input OME-Zarr representation, run `wrapper.py`, import the labeled
-output through direct and BIOMERO paths, compare metadata, and optionally clean
-up imports. See the tool README for prerequisites and commands.
+**Run OMERO Roundtrip** processes the first top-level OME-Zarr through local
+OMERO, BIOMERO, and Slurm, then re-exports the OMERO-imported result into the
+selected output folder. `builddocker.cmd` records the source fingerprint and
+immutable image ID in a Git-ignored local state file. The roundtrip skips its
+Docker build and SIF conversion when those identities still match.
+
+The progress dialog reports BIOMERO and Slurm identifiers when available and
+prints a heartbeat while analysis or result import is still running. Cancel
+terminates the local process tree and cancels the active cisegmentation Slurm
+job; temporary OMERO objects and Slurm evidence are retained. A fully
+successful roundtrip exports results, collects correlated logs under
+`outputfolder/logs/<roundtrip-id>/`, and deletes its temporary OMERO objects.

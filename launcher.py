@@ -14,7 +14,7 @@ if sys.platform == "win32":
         "ci.w_cisegmentation.bilayers_launcher"
     )
 
-from PyQt6.QtCore import QProcess, Qt, pyqtSignal
+from PyQt6.QtCore import QProcess, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -71,6 +71,8 @@ class RoundtripDialog(QDialog):
         self.setWindowIcon(QIcon(str(ICON)))
         self.resize(820, 520)
         self.job_id: str | None = None
+        self.execution_id: str | None = None
+        self.cancel_requested = False
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(ROOT))
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -107,17 +109,25 @@ class RoundtripDialog(QDialog):
         for line in text.splitlines():
             if line.startswith("PHASE:"):
                 self.status.setText(line.removeprefix("PHASE:").strip())
+            elif line.startswith("BIOMERO_EXECUTION_ID:"):
+                self.execution_id = line.split(":", 1)[1].strip()
+                self.status.setText(f"BIOMERO execution {self.execution_id} is running")
             elif line.startswith("SLURM_JOB_ID:"):
                 self.job_id = line.split(":", 1)[1].strip()
                 self.status.setText(f"Slurm job {self.job_id} is running")
 
     def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
         self._read_output()
-        self.status.setText(
-            "Roundtrip completed successfully."
-            if exit_code == 0
-            else f"Roundtrip stopped with exit code {exit_code}. See the log folder for details."
-        )
+        if self.cancel_requested:
+            self.status.setText(
+                "Roundtrip cancelled. Temporary OMERO and Slurm data were retained."
+            )
+        else:
+            self.status.setText(
+                "Roundtrip completed successfully."
+                if exit_code == 0
+                else f"Roundtrip stopped with exit code {exit_code}. See the log folder for details."
+            )
         self.cancel_button.setEnabled(False)
         self.close_button.setEnabled(True)
         self.roundtripFinished.emit(exit_code)
@@ -126,11 +136,39 @@ class RoundtripDialog(QDialog):
         self.output.append(f"\nCould not run roundtrip process: {error.name}")
 
     def cancel_roundtrip(self) -> None:
+        if self.cancel_requested:
+            return
+        self.cancel_requested = True
         self.cancel_button.setEnabled(False)
         self.status.setText("Cancelling; OMERO and Slurm data will be retained…")
         if self.job_id:
             subprocess.Popen(["docker", "exec", "slurmctld", "scancel", self.job_id])
-        self.process.terminate()
+        else:
+            subprocess.Popen(
+                [
+                    "docker",
+                    "exec",
+                    "slurmctld",
+                    "bash",
+                    "-lc",
+                    "squeue -h -n omero-job-cisegmentation -o %A | tail -1 | xargs -r scancel",
+                ]
+            )
+        process_id = int(self.process.processId())
+        if sys.platform == "win32" and process_id:
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            subprocess.Popen(
+                ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                creationflags=flags,
+            )
+        else:
+            self.process.terminate()
+        QTimer.singleShot(
+            3000,
+            lambda: self.process.kill()
+            if self.process.state() != QProcess.ProcessState.NotRunning
+            else None,
+        )
 
     def reject(self) -> None:
         if self.process.state() != QProcess.ProcessState.NotRunning:
@@ -195,7 +233,10 @@ def _append_parameters(command: list[str], config: dict, values: dict) -> list[s
         config.get("parameters", []), key=lambda entry: int(entry.get("cli_order", 0))
     ):
         value = values.get(item["name"], item.get("default"))
-        if value in (None, "", False, []):
+        passes_boolean_value = item.get("type") == "checkbox" and item.get(
+            "append_value", False
+        )
+        if value in (None, "", []) or (value is False and not passes_boolean_value):
             continue
         command.append(str(item["cli_tag"]))
         if item.get("type") != "checkbox" or item.get("append_value", False):
@@ -475,6 +516,7 @@ class Window(QMainWindow):
         return self.docker_command()
 
     def refresh(self) -> None:
+        self._update_parameter_state()
         self.preview.setPlainText(
             "Docker:\n"
             + subprocess.list2cmdline(self.docker_command())
@@ -483,6 +525,31 @@ class Window(QMainWindow):
             + "\n\nOMERO roundtrip:\n"
             + subprocess.list2cmdline(self.roundtrip_command())
         )
+
+    def _update_parameter_state(self) -> None:
+        multi = bool(
+            isinstance(self.widgets.get("multi_step"), QCheckBox)
+            and self.widgets["multi_step"].isChecked()
+        )
+        for name in ("model", "target", "primary_channel", "nuclei_channel"):
+            if name in self.widgets:
+                self.widgets[name].setEnabled(not multi)
+        groups = {
+            "cell_step": ("cell_model", "cell_channel", "cell_nuclei_channel"),
+            "nucleus_step": ("nucleus_model", "nucleus_channel"),
+            "spot_step": ("spot_model", "spot_channels"),
+        }
+        for toggle_name, dependent_names in groups.items():
+            toggle = self.widgets.get(toggle_name)
+            if toggle is not None:
+                toggle.setEnabled(multi)
+            enabled = multi and isinstance(toggle, QCheckBox) and toggle.isChecked()
+            for name in dependent_names:
+                if name in self.widgets:
+                    self.widgets[name].setEnabled(enabled)
+        for name in ("derive_cytoplasm", "remove_border_cells"):
+            if name in self.widgets:
+                self.widgets[name].setEnabled(multi)
 
     def run_docker(self) -> None:
         self.save()

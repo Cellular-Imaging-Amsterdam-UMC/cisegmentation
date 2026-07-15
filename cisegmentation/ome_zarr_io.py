@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import shutil
+import time
 from typing import Any, Iterable
 
 import numpy as np
@@ -46,6 +48,48 @@ class LabelResult:
 
 def _attrs(group) -> dict[str, Any]:
     return dict(group.attrs.asdict() if hasattr(group.attrs, "asdict") else group.attrs)
+
+
+_PHASE_TIMING_KEYS = (
+    "startup_seconds",
+    "zarr_read_seconds",
+    "import_seconds",
+    "device_setup_seconds",
+    "model_load_seconds",
+    "inference_seconds",
+    "zarr_write_seconds",
+)
+
+
+def _finalize_timings(
+    timings: dict[str, Any] | None, zarr_write_seconds: float
+) -> dict[str, float]:
+    result = {
+        key: float((timings or {}).get(key, 0.0)) for key in _PHASE_TIMING_KEYS
+    }
+    result["zarr_write_seconds"] = float(zarr_write_seconds)
+    result["total_seconds"] = sum(result[key] for key in _PHASE_TIMING_KEYS)
+    return result
+
+
+def _set_write_timing(group, write_started: float) -> None:
+    metadata = dict(_attrs(group).get("cisegmentation", {}))
+    metadata["timings"] = _finalize_timings(
+        metadata.get("timings"), time.perf_counter() - write_started
+    )
+    group.attrs["cisegmentation"] = metadata
+
+
+def _install_store(temporary: Path, output_path: Path) -> None:
+    """Atomically install a completed store, tolerating brief Windows locks."""
+    for attempt in range(20):
+        try:
+            os.replace(temporary, output_path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.1)
 
 
 def discover_ome_zarrs(input_dir: str | Path) -> list[Path]:
@@ -191,19 +235,42 @@ def _scale_values(source: ImageData, xy_factor: int = 1) -> list[float]:
     ]
 
 
+_LABEL_COLORS = ("00FF00", "0000FF", "FF00FF", "FFFF00", "00FFFF", "FF8000", "FF0000")
+
+
+def _label_channel_color(label: str, index: int) -> str:
+    text = label.lower()
+    if "cytoplasm" in text:
+        return "FF00FF"
+    if "nucle" in text:
+        return "0000FF"
+    if "cell" in text:
+        return "00FF00"
+    if "spot" in text or "foci" in text:
+        return ("FFFF00", "00FFFF", "FF8000", "FF0000")[index % 4]
+    return _LABEL_COLORS[index % len(_LABEL_COLORS)]
+
+
+def _ome_color_int(color: str) -> int:
+    rgba = (int(color, 16) << 8) | 255
+    return rgba if rgba < 2**31 else rgba - 2**32
+
+
 def _ome_xml(result: LabelResult, name: str) -> str:
     t, c, z, y, x = result.labels.shape
     px_x, px_y, px_z = (result.source.scales.get(axis, 1.0) for axis in ("x", "y", "z"))
     channel_names = result.channel_labels or [f"{result.target} labels"]
     channels = "".join(
-        f'<Channel ID="Channel:0:{index}" Name="{channel_name}" SamplesPerPixel="1"/>'
+        f'<Channel ID="Channel:0:{index}" Name="{channel_name}" '
+        f'Color="{_ome_color_int(_label_channel_color(channel_name, index))}" '
+        'SamplesPerPixel="1"/>'
         for index, channel_name in enumerate(channel_names)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
         f'<Image ID="Image:0" Name="{name}"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" '
-        f'Type="uint32" SizeX="{x}" SizeY="{y}" SizeZ="{z}" SizeC="{c}" SizeT="{t}" '
+        f'Type="int32" SizeX="{x}" SizeY="{y}" SizeZ="{z}" SizeC="{c}" SizeT="{t}" '
         f'PhysicalSizeX="{px_x}" PhysicalSizeY="{px_y}" PhysicalSizeZ="{px_z}">'
         f"{channels}"
         "</Pixels></Image></OME>"
@@ -211,7 +278,12 @@ def _ome_xml(result: LabelResult, name: str) -> str:
 
 
 def _write_image_group(group, result: LabelResult, name: str) -> None:
-    labels = np.asarray(result.labels, dtype=np.uint32)
+    label_max = int(np.asarray(result.labels).max(initial=0))
+    if label_max > np.iinfo(np.int32).max:
+        raise OverflowError(
+            f"Maximum label ID {label_max} exceeds QuPath-compatible int32 range"
+        )
+    labels = np.asarray(result.labels, dtype=np.int32)
     levels = [labels]
     while min(levels[-1].shape[-2:]) >= 512 and len(levels) < 5:
         levels.append(_downsample_labels(levels[-1]))
@@ -234,19 +306,24 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
         {"version": "0.4", "name": name, "axes": _axis_metadata(), "datasets": datasets}
     ]
     channel_names = result.channel_labels or [f"{result.target} labels"]
+    channel_maxima = [
+        max(1, int(labels[:, index].max(initial=0)))
+        for index in range(labels.shape[1])
+    ]
     group.attrs["omero"] = {
         "version": "0.4",
         "name": name,
         "channels": [
             {
                 "label": channel_name,
-                "color": f"{(index * 2654435761) & 0xFFFFFF:06X}",
-                "active": index == 0,
+                "color": _label_channel_color(channel_name, index),
+                "lookupTable": "glasbey_inverted.lut",
+                "active": True,
                 "window": {
                     "start": 0.0,
-                    "end": float(labels[:, index].max(initial=0)),
+                    "end": float(channel_maxima[index]),
                     "min": 0.0,
-                    "max": float(labels[:, index].max(initial=0)),
+                    "max": float(channel_maxima[index]),
                 },
             }
             for index, channel_name in enumerate(channel_names)
@@ -257,6 +334,12 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
         "model": result.model_id,
         "target": result.target,
         "source": str(result.source.resource.store_path.name),
+        "storage_dtype": "int32",
+        "label_rendering": {
+            "lookup_table": "glasbey_inverted.lut",
+            "rendering_only": True,
+            "pixel_values_transformed": False,
+        },
         **result.provenance,
     }
     store_root = getattr(group.store, "path", None) or getattr(
@@ -275,16 +358,18 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
 def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
     import zarr
 
+    write_started = time.perf_counter()
     output_path = Path(output_path)
     temporary = output_path.with_name(output_path.name + ".partial")
     if temporary.exists():
         shutil.rmtree(temporary)
     root = zarr.open_group(str(temporary), mode="w", zarr_version=2)
     _write_image_group(root, result, output_path.name.removesuffix(".ome.zarr"))
+    _set_write_timing(root, write_started)
     root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
-    temporary.replace(output_path)
+    _install_store(temporary, output_path)
     return output_path
 
 
@@ -297,6 +382,7 @@ def write_rgb_gallery(
     """Write a synthetic 2D RGB benchmark montage as NGFF 0.4/Zarr v2."""
     import zarr
 
+    write_started = time.perf_counter()
     cyx = np.asarray(cyx, dtype=np.uint8)
     if cyx.ndim != 3 or cyx.shape[0] != 3:
         raise ValueError(f"RGB gallery must have shape (3,Y,X), got {cyx.shape}")
@@ -381,16 +467,18 @@ def write_rgb_gallery(
         f'SizeZ="1" SizeC="3" SizeT="1">{channels}</Pixels></Image></OME>'
     )
     (ome / "METADATA.ome.xml").write_text(xml, encoding="utf-8")
+    _set_write_timing(root, write_started)
     root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
-    temporary.replace(output_path)
+    _install_store(temporary, output_path)
     return output_path
 
 
 def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> Path:
     import zarr
 
+    write_started = time.perf_counter()
     result_list = list(results)
     if not result_list:
         raise ValueError("Cannot write an empty HCS result")
@@ -423,8 +511,34 @@ def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> 
             "columns": [],
             "wells": [{"path": path} for path in sorted(wells)],
         }
+    timing_records = [result.provenance.get("timings", {}) for result in result_list]
+    aggregated = {
+        key: (
+            max((float(record.get(key, 0.0)) for record in timing_records), default=0.0)
+            if key == "startup_seconds"
+            else sum(float(record.get(key, 0.0)) for record in timing_records)
+        )
+        for key in _PHASE_TIMING_KEYS
+        if key != "zarr_write_seconds"
+    }
+    root.attrs["cisegmentation"] = {
+        "model": result_list[0].model_id,
+        "target": result_list[0].target,
+        "source": result_list[0].source.resource.store_path.name,
+        "field_count": len(result_list),
+        "model_cache_hits": sum(
+            int(result.provenance.get("model_cache_hits", 0))
+            for result in result_list
+        ),
+        "model_cache_misses": sum(
+            int(result.provenance.get("model_cache_misses", 0))
+            for result in result_list
+        ),
+        "timings": aggregated,
+    }
+    _set_write_timing(root, write_started)
     root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
-    temporary.replace(output_path)
+    _install_store(temporary, output_path)
     return output_path

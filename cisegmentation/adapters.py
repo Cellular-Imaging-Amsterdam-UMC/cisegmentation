@@ -2,13 +2,50 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 from .registry import ModelSpec
 from .settings import SegmentationSettings
+
+
+_MODEL_CACHE: dict[tuple[str, str], Any] = {}
+
+
+def clear_model_cache() -> None:
+    """Clear process-local models, primarily for tests and controlled teardown."""
+    _MODEL_CACHE.clear()
+
+
+def _cached_model(
+    model_id: str,
+    device: str,
+    importer: Callable[[], Any],
+    constructor: Callable[[Any], Any],
+) -> tuple[Any, dict[str, Any]]:
+    """Load a model once per stable model ID and device in this process."""
+    key = (model_id, device)
+    if key in _MODEL_CACHE:
+        return _MODEL_CACHE[key], {
+            "model_cache_hit": True,
+            "import_seconds": 0.0,
+            "model_load_seconds": 0.0,
+        }
+    started = time.perf_counter()
+    imported = importer()
+    import_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    model = constructor(imported)
+    model_load_seconds = time.perf_counter() - started
+    _MODEL_CACHE[key] = model
+    return model, {
+        "model_cache_hit": False,
+        "import_seconds": import_seconds,
+        "model_load_seconds": model_load_seconds,
+    }
 
 
 def _models_root() -> Path:
@@ -156,21 +193,32 @@ def _segment_cellpose(
     settings: SegmentationSettings,
     device: str,
     scales: dict[str, float],
-) -> np.ndarray:
+) -> tuple[np.ndarray, dict[str, Any]]:
     _configure_model_cache()
     image = _selected_image(czyx, settings)
     gpu = device == "cuda"
-    if spec.family == "cellpose3":
-        import torch
 
-        # PyTorch 2.11 warns when the legacy Cellpose implementation relies on
-        # the historical default (checks disabled). Make that choice explicit:
-        # this preserves Cellpose 3 behavior without broadly filtering warnings.
-        torch.sparse.check_sparse_tensor_invariants.disable()
-        from cellpose3_legacy import models
-    else:
-        from cellpose import models
-    model = models.CellposeModel(gpu=gpu, pretrained_model=spec.checkpoint)
+    def importer():
+        if spec.family == "cellpose3":
+            import torch
+
+            # Preserve legacy Cellpose behavior while silencing PyTorch's
+            # sparse-invariant warning explicitly.
+            torch.sparse.check_sparse_tensor_invariants.disable()
+            from cellpose3_legacy import models
+        else:
+            from cellpose import models
+        return models
+
+    model, timing = _cached_model(
+        spec.id,
+        device,
+        importer,
+        lambda models: models.CellposeModel(
+            gpu=gpu, pretrained_model=spec.checkpoint
+        ),
+    )
+    inference_started = time.perf_counter()
     kwargs: dict[str, Any] = {
         "diameter": _cellpose_diameter_pixels(
             settings.diameter, settings.target, scales
@@ -186,12 +234,20 @@ def _segment_cellpose(
     )
     if native_3d:
         masks, *_ = model.eval(image, z_axis=0, do_3D=True, **kwargs)
-        return np.asarray(masks, dtype=np.uint32)
+        labels = np.asarray(masks, dtype=np.uint32)
+        return labels, {
+            **timing,
+            "inference_seconds": time.perf_counter() - inference_started,
+        }
     planes = []
     for z_index in range(image.shape[0]):
         masks, *_ = model.eval(image[z_index], **kwargs)
         planes.append(np.asarray(masks))
-    return _unique_plane_labels(planes)
+    labels = _unique_plane_labels(planes)
+    return labels, {
+        **timing,
+        "inference_seconds": time.perf_counter() - inference_started,
+    }
 
 
 def _stardist_model_path(checkpoint: str) -> Path:
@@ -235,11 +291,17 @@ def _segment_stardist(
     settings: SegmentationSettings,
     device: str,
     scales: dict[str, float],
-) -> np.ndarray:
-    from cistardist_pytorch import StarDist2D
-
+) -> tuple[np.ndarray, dict[str, Any]]:
     channel = settings.selected_channels(czyx.shape[0])[0]
-    model = StarDist2D.from_folder(_stardist_model_path(spec.checkpoint), device=device)
+    model, timing = _cached_model(
+        spec.id,
+        device,
+        lambda: __import__("cistardist_pytorch", fromlist=["StarDist2D"]).StarDist2D,
+        lambda StarDist2D: StarDist2D.from_folder(
+            _stardist_model_path(spec.checkpoint), device=device
+        ),
+    )
+    inference_started = time.perf_counter()
     prob = (
         None
         if settings.stardist_prob_threshold < 0
@@ -256,7 +318,11 @@ def _segment_stardist(
             plane, original_shape = _stardist_versatile_input(plane, scales)
         labels = _predict_stardist_tiled(model, plane, prob, nms)
         planes.append(_resize_2d(labels, original_shape, labels=True))
-    return _unique_plane_labels(planes)
+    labels = _unique_plane_labels(planes)
+    return labels, {
+        **timing,
+        "inference_seconds": time.perf_counter() - inference_started,
+    }
 
 
 def _segment_instanseg(
@@ -264,13 +330,12 @@ def _segment_instanseg(
     spec: ModelSpec,
     settings: SegmentationSettings,
     pixel_size_um: float,
-) -> np.ndarray:
+    device: str = "cpu",
+) -> tuple[np.ndarray, dict[str, Any]]:
     if not np.isfinite(pixel_size_um) or pixel_size_um <= 0:
         raise ValueError(
             "InstanSeg requires a positive XY pixel size in OME-Zarr metadata"
         )
-    from instanseg import InstanSeg
-
     channels = (
         list(range(3))
         if spec.checkpoint == "brightfield_nuclei" and czyx.shape[0] >= 3
@@ -282,12 +347,22 @@ def _segment_instanseg(
         )
     model_root = _configure_model_cache() / "instanseg"
     checkpoint = model_root / spec.checkpoint / "instanseg.pt"
-    if checkpoint.exists():
-        import torch
+    def constructor(InstanSeg):
+        if checkpoint.exists():
+            import torch
 
-        model = InstanSeg(torch.jit.load(str(checkpoint), map_location="cpu"), verbosity=0)
-    else:
-        model = InstanSeg(spec.checkpoint, verbosity=0)
+            return InstanSeg(
+                torch.jit.load(str(checkpoint), map_location="cpu"), verbosity=0
+            )
+        return InstanSeg(spec.checkpoint, verbosity=0)
+
+    model, timing = _cached_model(
+        spec.id,
+        device,
+        lambda: __import__("instanseg", fromlist=["InstanSeg"]).InstanSeg,
+        constructor,
+    )
+    inference_started = time.perf_counter()
     target_index = (
         1
         if settings.target == "cells"
@@ -305,7 +380,11 @@ def _segment_instanseg(
             else:
                 array = np.squeeze(array, axis=0)
         planes.append(array)
-    return _unique_plane_labels(planes)
+    labels = _unique_plane_labels(planes)
+    return labels, {
+        **timing,
+        "inference_seconds": time.perf_counter() - inference_started,
+    }
 
 
 def _segment_spotiflow(
@@ -314,14 +393,18 @@ def _segment_spotiflow(
     settings: SegmentationSettings,
     device: str,
     scales: dict[str, float],
-) -> np.ndarray:
-    from spotiflow.model import Spotiflow
-
+) -> tuple[np.ndarray, dict[str, Any]]:
     root = _configure_model_cache()
     cache = Path(os.environ.get("SPOTIFLOW_CACHE_DIR", root / "spotiflow"))
-    model = Spotiflow.from_pretrained(
-        spec.checkpoint, cache_dir=cache, map_location=device, verbose=False
+    model, timing = _cached_model(
+        spec.id,
+        device,
+        lambda: __import__("spotiflow.model", fromlist=["Spotiflow"]).Spotiflow,
+        lambda Spotiflow: Spotiflow.from_pretrained(
+            spec.checkpoint, cache_dir=cache, map_location=device, verbose=False
+        ),
     )
+    inference_started = time.perf_counter()
     channel = settings.selected_channels(czyx.shape[0])[0]
     volume = czyx[channel]
     threshold = (
@@ -345,8 +428,12 @@ def _segment_spotiflow(
             device=device,
             verbose=False,
         )
-        return points_to_labels(points, volume.shape)
-    return _unique_plane_labels(
+        labels = points_to_labels(points, volume.shape)
+        return labels, {
+            **timing,
+            "inference_seconds": time.perf_counter() - inference_started,
+        }
+    labels = _unique_plane_labels(
         [
             points_to_labels(
                 model.predict(
@@ -361,6 +448,10 @@ def _segment_spotiflow(
             for z in range(volume.shape[0])
         ]
     )
+    return labels, {
+        **timing,
+        "inference_seconds": time.perf_counter() - inference_started,
+    }
 
 
 def segment_czyx(
@@ -374,19 +465,38 @@ def segment_czyx(
             f"Model {spec.id} does not support target {settings.target!r}; supported: {', '.join(spec.targets)}"
         )
     settings.selected_channels(czyx.shape[0])
-    device = resolve_device(settings.device)
     start = time.perf_counter()
+    torch_was_loaded = "torch" in sys.modules
+    device_started = time.perf_counter()
+    device = resolve_device(settings.device)
+    device_seconds = time.perf_counter() - device_started
+    device_import_seconds = (
+        device_seconds if not torch_was_loaded and "torch" in sys.modules else 0.0
+    )
+    device_setup_seconds = device_seconds - device_import_seconds
     if spec.family in {"cellpose3", "cellpose-sam"}:
-        labels = _segment_cellpose(czyx, spec, settings, device, scales)
+        labels, timing = _segment_cellpose(czyx, spec, settings, device, scales)
     elif spec.family == "stardist":
-        labels = _segment_stardist(czyx, spec, settings, device, scales)
+        labels, timing = _segment_stardist(czyx, spec, settings, device, scales)
     elif spec.family == "instanseg":
-        labels = _segment_instanseg(czyx, spec, settings, scales.get("x", float("nan")))
+        labels, timing = _segment_instanseg(
+            czyx,
+            spec,
+            settings,
+            scales.get("x", float("nan")),
+            device,
+        )
     elif spec.family == "spotiflow":
-        labels = _segment_spotiflow(czyx, spec, settings, device, scales)
+        labels, timing = _segment_spotiflow(czyx, spec, settings, device, scales)
     else:
         raise ValueError(f"No adapter for model family {spec.family}")
     elapsed = time.perf_counter() - start
+    timing = {
+        **timing,
+        "import_seconds": float(timing.get("import_seconds", 0.0))
+        + device_import_seconds,
+        "device_setup_seconds": device_setup_seconds,
+    }
     return np.asarray(labels, dtype=np.uint32), {
         "device": device,
         "runtime_seconds": elapsed,
@@ -396,4 +506,6 @@ def segment_czyx(
         and labels.shape[0] > 1
         and settings.dimension_mode != "slice-2d"
         else "slice-2d",
+        "model_cache_hit": bool(timing.get("model_cache_hit")),
+        "timings": timing,
     }

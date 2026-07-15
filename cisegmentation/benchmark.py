@@ -176,7 +176,11 @@ def _gallery(
 
 
 def run_benchmark(
-    image: ImageData, settings: SegmentationSettings, output_dir: str | Path
+    image: ImageData,
+    settings: SegmentationSettings,
+    output_dir: str | Path,
+    *,
+    base_timings: dict[str, float] | None = None,
 ) -> tuple[Path, bool]:
     first_t, crop = center_crop(image.data[0])
     specs = _benchmark_specs(settings, first_t.shape[0])
@@ -236,6 +240,10 @@ def run_benchmark(
     primary = settings.selected_channels(first_t.shape[0])[0]
     raw_mip = np.max(first_t[primary], axis=0)
     gallery = _gallery(raw_mip, specs, runs, labels_by_model)
+    timings = dict(base_timings or {})
+    for run in runs:
+        for key, value in run.get("timings", {}).items():
+            timings[key] = timings.get(key, 0.0) + float(value)
     output = Path(output_dir) / f"benchmark_gallery_{image.resource.name}.ome.zarr"
     write_rgb_gallery(
         gallery,
@@ -245,6 +253,7 @@ def run_benchmark(
             "first_timepoint": 0,
             "crop": crop,
             "runs": runs,
+            "timings": timings,
             "parameters": settings.to_dict(),
             "layout": "2d-xy-input-and-segmentation-panels",
         },

@@ -24,6 +24,17 @@ def test_channel_selection_is_one_based_and_validated():
         SegmentationSettings(primary_channel=4).selected_channels(3)
 
 
+def test_repeated_spot_channels_are_retained_and_validated():
+    settings = SegmentationSettings(spot_channels="2, 2;3")
+    assert settings.selected_spot_channels(3) == [1, 1, 2]
+    assert SegmentationSettings(spot_channels=[2, 2]).selected_spot_channels(3) == [
+        1,
+        1,
+    ]
+    with pytest.raises(ValueError, match="outside input channel count"):
+        SegmentationSettings(spot_channels="4").selected_spot_channels(3)
+
+
 @pytest.mark.parametrize(
     "value, expected",
     [

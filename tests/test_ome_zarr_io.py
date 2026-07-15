@@ -35,17 +35,51 @@ def test_discover_accepts_biomero_zarr_name(tmp_path):
     assert discover_ome_zarrs(tmp_path) == [store]
 
 
-def test_write_standalone_uint32_label_zarr(inputfolder, outputfolder):
+def test_write_standalone_int32_label_zarr(inputfolder, outputfolder):
     source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
     labels = np.zeros((1, 1, 1, 64, 64), dtype=np.uint32)
-    labels[0, 0, 0, 10:20, 10:20] = 1
+    labels[0, 0, 0, 10:20, 10:20] = 7
     result = LabelResult(labels, source, "stardist:SD_Nuclei_Versatile", "nuclei")
     output = write_label_image(result, outputfolder / "labels.ome.zarr")
     root = zarr.open_group(str(output), mode="r")
-    assert root["0"].dtype == np.dtype("uint32")
+    assert root["0"].dtype == np.dtype("int32")
     assert root["0"].shape == labels.shape
+    np.testing.assert_array_equal(np.asarray(root["0"]), labels)
     assert root.attrs["multiscales"][0]["version"] == "0.4"
+    channel = root.attrs["omero"]["channels"][0]
+    assert channel["color"] == "0000FF"
+    assert channel["lookupTable"] == "glasbey_inverted.lut"
+    assert channel["window"] == {"start": 0.0, "end": 7.0, "min": 0.0, "max": 7.0}
+    assert root.attrs["cisegmentation"]["label_rendering"] == {
+        "lookup_table": "glasbey_inverted.lut",
+        "rendering_only": True,
+        "pixel_values_transformed": False,
+    }
+    assert root.attrs["cisegmentation"]["storage_dtype"] == "int32"
+    assert 'Type="int32"' in (output / "OME" / "METADATA.ome.xml").read_text(
+        encoding="utf-8"
+    )
+    timings = root.attrs["cisegmentation"]["timings"]
+    assert timings["zarr_write_seconds"] > 0
+    assert timings["total_seconds"] >= timings["zarr_write_seconds"]
+    assert set(timings) >= {
+        "startup_seconds",
+        "zarr_read_seconds",
+        "import_seconds",
+        "model_load_seconds",
+        "inference_seconds",
+        "zarr_write_seconds",
+        "total_seconds",
+    }
     assert (output / "OME" / "METADATA.ome.xml").exists()
+
+
+def test_label_writer_rejects_ids_outside_int32_range(inputfolder, outputfolder):
+    source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
+    labels = np.array([[[[[np.iinfo(np.int32).max + 1]]]]], dtype=np.uint64)
+    result = LabelResult(labels, source, "test", "nuclei")
+    with pytest.raises(OverflowError, match="exceeds QuPath-compatible int32"):
+        write_label_image(result, outputfolder / "overflow.ome.zarr")
 
 
 def test_write_multichannel_benchmark_gallery(inputfolder, outputfolder):
@@ -65,6 +99,10 @@ def test_write_multichannel_benchmark_gallery(inputfolder, outputfolder):
         "model:a",
         "model:b",
     ]
+    assert all(
+        channel["lookupTable"] == "glasbey_inverted.lut"
+        for channel in root.attrs["omero"]["channels"]
+    )
 
 
 def test_hcs_resource_enumeration(outputfolder):
