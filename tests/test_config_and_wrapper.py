@@ -10,10 +10,24 @@ def test_bilayers_config_is_structurally_valid():
     parameters = {item["name"]: item for item in config["parameters"]}
     assert "instanseg_pixel_size_um" not in parameters
     assert parameters["diameter"]["mode"] == "advanced"
-    spot_values = {
-        option["value"] for option in parameters["benchmark_models"]["options"]
-    }
-    assert "spotiflow:general" in spot_values
+    benchmark = parameters["benchmark_models"]
+    assert benchmark["multiselect"] is False
+    assert [option["value"] for option in benchmark["options"]] == [
+        "all",
+        "cellpose",
+        "cellpose3",
+        "stardist",
+        "instanseg",
+        "spotiflow",
+    ]
+    assert [option["label"] for option in benchmark["options"]] == [
+        "All Algorithms, All Models",
+        "Cellpose (SAM), All Models",
+        "Cellpose 3 (Legacy), All Models",
+        "StarDist, All Models",
+        "InstanSeg, All Models",
+        "Spotiflow, All Models",
+    ]
 
 
 def test_wrapper_accepts_hyphenated_bilayers_parameters():

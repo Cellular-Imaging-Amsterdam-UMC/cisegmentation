@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from cisegmentation.adapters import _segment_instanseg, points_to_labels
 from cisegmentation.registry import get_model_spec
@@ -47,7 +48,7 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
         ),
     )
     settings = SegmentationSettings(
-        target="nuclei", benchmark=True, benchmark_models="stardist:SD_Nuclei_Versatile"
+        target="nuclei", benchmark=True, benchmark_models="stardist"
     )
     output, failed = run_benchmark(image, settings, outputfolder)
     assert not failed
@@ -61,6 +62,11 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
     assert root.attrs["cisegmentation"]["layout"] == (
         "2d-xy-input-and-segmentation-panels"
     )
+    assert [run["target"] for run in root.attrs["cisegmentation"]["runs"]] == [
+        "nuclei",
+        "foci",
+        "foci",
+    ]
 
 
 def test_all_benchmark_includes_spotiflow():
@@ -68,3 +74,25 @@ def test_all_benchmark_includes_spotiflow():
     ids = {spec.id for spec in _benchmark_specs(settings, 1)}
     assert "spotiflow:general" in ids
     assert "spotiflow:smfish_3d" in ids
+
+
+@pytest.mark.parametrize(
+    "preset,expected_families,expected_count",
+    [
+        (
+            "all",
+            {"cellpose3", "cellpose-sam", "stardist", "instanseg", "spotiflow"},
+            38,
+        ),
+        ("cellpose", {"cellpose-sam"}, 1),
+        ("cellpose3", {"cellpose3"}, 25),
+        ("stardist", {"stardist"}, 3),
+        ("instanseg", {"instanseg"}, 3),
+        ("spotiflow", {"spotiflow"}, 6),
+    ],
+)
+def test_benchmark_family_presets(preset, expected_families, expected_count):
+    settings = SegmentationSettings(target="nuclei", benchmark_models=preset)
+    specs = _benchmark_specs(settings, 1)
+    assert {spec.family for spec in specs} == expected_families
+    assert len(specs) == expected_count

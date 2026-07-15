@@ -163,49 +163,16 @@ parameters:
 - name: benchmark_models
   type: dropdown
   label: Benchmark Models
-  description: Select all compatible segmentation checkpoints plus Spotiflow, or any model combination.
+  description: Select an algorithm-family preset. Every model in the preset is benchmarked using a supported target.
   options:
-  - {label: All eligible models, value: all}
-  - {label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}
-  - {label: Cellpose 3 cyto3, value: 'cellpose3:cyto3'}
-  - {label: Cellpose 3 cyto2 cp3, value: 'cellpose3:cyto2_cp3'}
-  - {label: Cellpose 3 TissueNet cp3, value: 'cellpose3:tissuenet_cp3'}
-  - {label: Cellpose 3 LiveCell cp3, value: 'cellpose3:livecell_cp3'}
-  - {label: Cellpose 3 yeast phase contrast, value: 'cellpose3:yeast_PhC_cp3'}
-  - {label: Cellpose 3 yeast brightfield, value: 'cellpose3:yeast_BF_cp3'}
-  - {label: Cellpose 3 bacteria phase, value: 'cellpose3:bact_phase_cp3'}
-  - {label: Cellpose 3 bacteria fluorescence, value: 'cellpose3:bact_fluor_cp3'}
-  - {label: Cellpose 3 DeepBacs, value: 'cellpose3:deepbacs_cp3'}
-  - {label: Cellpose cyto2, value: 'cellpose3:cyto2'}
-  - {label: Cellpose cyto, value: 'cellpose3:cyto'}
-  - {label: Cellpose CPx, value: 'cellpose3:CPx'}
-  - {label: Cellpose transformer cp3, value: 'cellpose3:transformer_cp3'}
-  - {label: Cellpose NeurIPS default, value: 'cellpose3:neurips_cellpose_default'}
-  - {label: Cellpose NeurIPS transformer, value: 'cellpose3:neurips_cellpose_transformer'}
-  - {label: Cellpose NeurIPS grayscale cyto2, value: 'cellpose3:neurips_grayscale_cyto2'}
-  - {label: Cellpose CP, value: 'cellpose3:CP'}
-  - {label: Cellpose TN1, value: 'cellpose3:TN1'}
-  - {label: Cellpose TN2, value: 'cellpose3:TN2'}
-  - {label: Cellpose TN3, value: 'cellpose3:TN3'}
-  - {label: Cellpose LC1, value: 'cellpose3:LC1'}
-  - {label: Cellpose LC2, value: 'cellpose3:LC2'}
-  - {label: Cellpose LC3, value: 'cellpose3:LC3'}
-  - {label: Cellpose LC4, value: 'cellpose3:LC4'}
-  - {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}
-  - {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}
-  - {label: StarDist foci aggregates, value: 'stardist:SD_Foci_Aggregates'}
-  - {label: StarDist foci Finn, value: 'stardist:SD_Foci_Finn'}
-  - {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}
-  - {label: InstanSeg brightfield nuclei, value: 'instanseg:brightfield_nuclei'}
-  - {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}
-  - {label: Spotiflow general, value: 'spotiflow:general'}
-  - {label: Spotiflow HYBISS, value: 'spotiflow:hybiss'}
-  - {label: Spotiflow synthetic complex, value: 'spotiflow:synth_complex'}
-  - {label: Spotiflow synthetic 3D, value: 'spotiflow:synth_3d'}
-  - {label: Spotiflow smFISH 3D, value: 'spotiflow:smfish_3d'}
-  - {label: Spotiflow fluorescence live, value: 'spotiflow:fluo_live'}
-  default: [all]
-  multiselect: true
+  - {label: 'All Algorithms, All Models', value: all}
+  - {label: 'Cellpose (SAM), All Models', value: cellpose}
+  - {label: 'Cellpose 3 (Legacy), All Models', value: cellpose3}
+  - {label: 'StarDist, All Models', value: stardist}
+  - {label: 'InstanSeg, All Models', value: instanseg}
+  - {label: 'Spotiflow, All Models', value: spotiflow}
+  default: all
+  multiselect: false
   cli_tag: --benchmark-models
   cli_order: 31
   optional: true

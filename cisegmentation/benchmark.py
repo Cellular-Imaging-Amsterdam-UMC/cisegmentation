@@ -12,7 +12,6 @@ from .ome_zarr_io import ImageData, write_rgb_gallery
 from .registry import (
     MODEL_REGISTRY,
     ModelSpec,
-    eligible_benchmark_models,
     get_model_spec,
 )
 from .settings import SegmentationSettings, parse_model_selection
@@ -36,17 +35,34 @@ def _benchmark_specs(
     settings: SegmentationSettings, channel_count: int
 ) -> list[ModelSpec]:
     selected = parse_model_selection(settings.benchmark_models)
-    if not selected or selected == ["all"]:
-        compatible = eligible_benchmark_models(settings.target, channel_count)
-        # Spotiflow is intentionally included in every "all" benchmark: it is a
-        # point detector, so its panels use the spots target independently.
-        spots = [
+    preset = selected[0] if len(selected) == 1 else ""
+    if not selected:
+        preset = "all"
+    families = {
+        "all": None,
+        "cellpose": {"cellpose-sam"},
+        "cellpose3": {"cellpose3"},
+        "stardist": {"stardist"},
+        "instanseg": {"instanseg"},
+        "spotiflow": {"spotiflow"},
+    }
+    if preset in families:
+        selected_families = families[preset]
+        return [
             spec
             for spec in MODEL_REGISTRY.values()
-            if spec.family == "spotiflow" and channel_count >= spec.min_channels
+            if selected_families is None or spec.family in selected_families
         ]
-        return list(dict.fromkeys([*compatible, *spots]))
     return [get_model_spec(model_id) for model_id in selected]
+
+
+def _is_preset(settings: SegmentationSettings) -> bool:
+    selected = parse_model_selection(settings.benchmark_models)
+    return not selected or (
+        len(selected) == 1
+        and selected[0]
+        in {"all", "cellpose", "cellpose3", "stardist", "instanseg", "spotiflow"}
+    )
 
 
 def _normalize(image: np.ndarray) -> np.ndarray:
@@ -167,24 +183,47 @@ def run_benchmark(
     runs: list[dict[str, Any]] = []
     labels_by_model: dict[str, np.ndarray] = {}
     failed = False
+    preset = _is_preset(settings)
     for spec in specs:
         is_spotiflow = spec.family == "spotiflow"
-        if (not is_spotiflow and settings.target not in spec.targets) or first_t.shape[
-            0
-        ] < spec.min_channels:
+        if first_t.shape[0] < spec.min_channels:
             runs.append(
                 {
                     "model": spec.id,
                     "status": "skipped",
-                    "reason": "incompatible target or channel count",
+                    "reason": "incompatible channel count",
                 }
             )
             continue
-        model_settings = replace(settings, target="spots") if is_spotiflow else settings
+        if preset:
+            model_target = (
+                settings.target if settings.target in spec.targets else spec.targets[0]
+            )
+        elif is_spotiflow:
+            model_target = "spots"
+        elif settings.target in spec.targets:
+            model_target = settings.target
+        else:
+            runs.append(
+                {
+                    "model": spec.id,
+                    "status": "skipped",
+                    "reason": "incompatible target",
+                }
+            )
+            continue
+        model_settings = replace(settings, target=model_target)
         try:
             labels, info = segment_czyx(first_t, spec, model_settings, image.scales)
             labels_by_model[spec.id] = labels
-            runs.append({"model": spec.id, "status": "success", **info})
+            runs.append(
+                {
+                    "model": spec.id,
+                    "target": model_target,
+                    "status": "success",
+                    **info,
+                }
+            )
         except Exception as exc:
             failed = True
             runs.append(
