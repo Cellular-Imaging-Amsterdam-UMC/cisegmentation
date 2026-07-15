@@ -21,7 +21,8 @@ constructs the Docker invocation from `config.yaml`.
 
 Run `create_env.cmd` to create or update the `cisegmentation` Conda environment with
 Python 3.11, PyTorch 2.11.0, torchvision 0.26.0, and CUDA 12.6 wheels. The
-script finishes with a CUDA smoke test.
+script also installs the PyQt launcher dependencies and finishes with a CUDA
+smoke test.
 
 For a direct local run after activating the environment:
 

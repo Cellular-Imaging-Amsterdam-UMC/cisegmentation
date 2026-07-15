@@ -1,3 +1,4 @@
+from pathlib import Path
 
 from bilayers_cli import load_config, validate_config
 from wrapper import build_parser
@@ -27,3 +28,8 @@ def test_wrapper_accepts_hyphenated_bilayers_parameters():
     assert args.model == "stardist:SD_Foci_Finn"
     assert args.primary_channel == 2
     assert args.benchmark is True
+
+
+def test_environment_bootstrap_installs_launcher_dependencies():
+    bootstrap = Path("create_env.cmd").read_text(encoding="utf-8")
+    assert "requirements_launcher.txt" in bootstrap

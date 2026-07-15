@@ -13,5 +13,7 @@ if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 "%CONDA_EXE%" run -n cisegmentation python -m pip install -r "%~dp0requirements.txt"
 if errorlevel 1 exit /b 1
+"%CONDA_EXE%" run -n cisegmentation python -m pip install -r "%~dp0requirements_launcher.txt"
+if errorlevel 1 exit /b 1
 "%CONDA_EXE%" run -n cisegmentation python "%~dp0tools\cuda_smoke.py"
 endlocal
