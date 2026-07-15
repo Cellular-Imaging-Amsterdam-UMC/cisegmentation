@@ -271,6 +271,7 @@ def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
         shutil.rmtree(temporary)
     root = zarr.open_group(str(temporary), mode="w", zarr_version=2)
     _write_image_group(root, result, output_path.name.removesuffix(".ome.zarr"))
+    root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
     temporary.replace(output_path)
@@ -370,6 +371,7 @@ def write_rgb_gallery(
         f'SizeZ="1" SizeC="3" SizeT="1">{channels}</Pixels></Image></OME>'
     )
     (ome / "METADATA.ome.xml").write_text(xml, encoding="utf-8")
+    root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
     temporary.replace(output_path)
@@ -411,6 +413,7 @@ def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> 
             "columns": [],
             "wells": [{"path": path} for path in sorted(wells)],
         }
+    root.store.close()
     if output_path.exists():
         shutil.rmtree(output_path)
     temporary.replace(output_path)

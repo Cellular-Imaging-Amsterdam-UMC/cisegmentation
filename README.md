@@ -27,6 +27,8 @@ smoke test.
 The launcher defaults to `inputfolder` and `outputfolder` in the repository
 root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
+The launcher provides separate **Run Docker** and **Run Locally** buttons; local
+mode uses the active Python environment and executes `wrapper.py` directly.
 
 For a direct local run after activating the environment:
 

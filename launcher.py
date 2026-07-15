@@ -97,6 +97,22 @@ def load_config() -> dict:
     return yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
 
 
+def _append_parameters(command: list[str], config: dict, values: dict) -> list[str]:
+    for item in sorted(
+        config.get("parameters", []), key=lambda entry: int(entry.get("cli_order", 0))
+    ):
+        value = values.get(item["name"], item.get("default"))
+        if value in (None, "", False, []):
+            continue
+        command.append(str(item["cli_tag"]))
+        if item.get("type") != "checkbox" or item.get("append_value", False):
+            if isinstance(value, list):
+                value = ",".join(value)
+            command.append(str(value))
+    command.append("--local")
+    return command
+
+
 def build_docker_command(
     config: dict, values: dict, input_dir: str, output_dir: str, gpu: bool = True
 ) -> list[str]:
@@ -112,19 +128,25 @@ def build_docker_command(
         f"{output_dir}:/data/out",
         image_name,
     ]
-    for item in sorted(
-        config.get("parameters", []), key=lambda entry: int(entry.get("cli_order", 0))
-    ):
-        value = values.get(item["name"], item.get("default"))
-        if value in (None, "", False, []):
-            continue
-        command.append(str(item["cli_tag"]))
-        if item.get("type") != "checkbox" or item.get("append_value", False):
-            if isinstance(value, list):
-                value = ",".join(value)
-            command.append(str(value))
-    command.append("--local")
-    return command
+    return _append_parameters(command, config, values)
+
+
+def build_local_command(
+    config: dict,
+    values: dict,
+    input_dir: str,
+    output_dir: str,
+    python_executable: str | None = None,
+) -> list[str]:
+    command = [
+        python_executable or sys.executable,
+        str(ROOT / "wrapper.py"),
+        "--infolder",
+        input_dir,
+        "--outfolder",
+        output_dir,
+    ]
+    return _append_parameters(command, config, values)
 
 
 class Window(QMainWindow):
@@ -202,9 +224,16 @@ class Window(QMainWindow):
         save.clicked.connect(self.save)
         buttons.addWidget(save)
         buttons.addStretch()
-        run = QPushButton("Run")
-        run.clicked.connect(self.run)
-        buttons.addWidget(run)
+        run_local = QPushButton("Run Locally")
+        run_local.setToolTip(
+            "Run wrapper.py with the Python environment used to launch this window."
+        )
+        run_local.clicked.connect(self.run_local)
+        buttons.addWidget(run_local)
+        run_docker = QPushButton("Run Docker")
+        run_docker.setToolTip("Run the configured container image with Docker.")
+        run_docker.clicked.connect(self.run_docker)
+        buttons.addWidget(run_docker)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
         buttons.addWidget(close)
@@ -309,7 +338,7 @@ class Window(QMainWindow):
                 values[name] = widget.text()
         return values
 
-    def command(self) -> list[str]:
+    def docker_command(self) -> list[str]:
         return build_docker_command(
             self.config,
             self.values(),
@@ -318,12 +347,33 @@ class Window(QMainWindow):
             self.gpu.isChecked(),
         )
 
-    def refresh(self) -> None:
-        self.preview.setPlainText(subprocess.list2cmdline(self.command()))
+    def local_command(self) -> list[str]:
+        return build_local_command(
+            self.config,
+            self.values(),
+            self.input_path.text(),
+            self.output_path.text(),
+        )
 
-    def run(self) -> None:
+    def command(self) -> list[str]:
+        """Return the Docker command for backward compatibility."""
+        return self.docker_command()
+
+    def refresh(self) -> None:
+        self.preview.setPlainText(
+            "Docker:\n"
+            + subprocess.list2cmdline(self.docker_command())
+            + "\n\nLocal Python:\n"
+            + subprocess.list2cmdline(self.local_command())
+        )
+
+    def run_docker(self) -> None:
         self.save()
-        subprocess.Popen(self.command(), cwd=ROOT)
+        subprocess.Popen(self.docker_command(), cwd=ROOT)
+
+    def run_local(self) -> None:
+        self.save()
+        subprocess.Popen(self.local_command(), cwd=ROOT)
 
     def save(self) -> None:
         SETTINGS.write_text(
