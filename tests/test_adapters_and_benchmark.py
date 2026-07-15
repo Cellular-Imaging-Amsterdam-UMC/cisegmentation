@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import numpy as np
 
 from cisegmentation.adapters import _segment_instanseg, points_to_labels
@@ -33,10 +31,12 @@ def test_instanseg_requires_metadata_pixel_size():
         )
 
 
-def test_benchmark_writes_only_one_multichannel_ome_zarr(tmp_path, monkeypatch):
+def test_benchmark_writes_only_one_multichannel_ome_zarr(
+    inputfolder, outputfolder, monkeypatch
+):
     import cisegmentation.benchmark as benchmark
 
-    data = Path(__file__).parent / "data" / "nuclei-small.ome.zarr"
+    data = inputfolder / "nuclei-small.ome.zarr"
     image = read_image(enumerate_resources(data)[0])
     monkeypatch.setattr(
         benchmark,
@@ -49,10 +49,10 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(tmp_path, monkeypatch):
     settings = SegmentationSettings(
         target="nuclei", benchmark=True, benchmark_models="stardist:SD_Nuclei_Versatile"
     )
-    output, failed = run_benchmark(image, settings, tmp_path)
+    output, failed = run_benchmark(image, settings, outputfolder)
     assert not failed
     assert output.suffixes[-2:] == [".ome", ".zarr"]
-    assert [path.name for path in tmp_path.iterdir()] == [output.name]
+    assert [path.name for path in outputfolder.iterdir()] == [output.name]
     import zarr
 
     root = zarr.open_group(str(output), mode="r")

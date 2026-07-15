@@ -6,6 +6,10 @@ __pycache__
 *.pyc
 models
 outputs
+inputfolder
+outputfolder
+tests/inputfolder
+tests/outputfolder
 dist
 build
 *.egg-info

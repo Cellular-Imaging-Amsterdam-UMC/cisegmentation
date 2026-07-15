@@ -24,17 +24,21 @@ Python 3.11, PyTorch 2.11.0, torchvision 0.26.0, and CUDA 12.6 wheels. The
 script also installs the PyQt launcher dependencies and finishes with a CUDA
 smoke test.
 
+The launcher defaults to `inputfolder` and `outputfolder` in the repository
+root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
+OME-Zarr fixtures from `tests/data` into the test input folder when required.
+
 For a direct local run after activating the environment:
 
 ```powershell
-python wrapper.py --infolder tests/data --outfolder outputs `
+python wrapper.py --infolder inputfolder --outfolder outputfolder `
   --model cellpose3:nuclei --target nuclei --device cuda
 ```
 
 Benchmark example:
 
 ```powershell
-python wrapper.py --infolder tests/data --outfolder outputs `
+python wrapper.py --infolder inputfolder --outfolder outputfolder `
   --benchmark true --benchmark-models all --target nuclei --device cuda
 ```
 

@@ -147,8 +147,8 @@ class Window(QMainWindow):
 
         folders = QGroupBox("Data folders")
         folder_form = QFormLayout(folders)
-        self.input_path = QLineEdit(str(ROOT / "tests" / "data"))
-        self.output_path = QLineEdit(str(ROOT / "outputs"))
+        self.input_path = QLineEdit(str(ROOT / "inputfolder"))
+        self.output_path = QLineEdit(str(ROOT / "outputfolder"))
         folder_form.addRow("Input folder:", self._folder_row(self.input_path))
         folder_form.addRow("Output folder:", self._folder_row(self.output_path))
         layout.addWidget(folders)

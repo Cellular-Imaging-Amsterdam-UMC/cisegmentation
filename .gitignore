@@ -4,6 +4,12 @@ __pycache__/
 .ruff_cache/
 .last_launcher_settings.json
 outputs/
+inputfolder/*
+!inputfolder/.gitkeep
+outputfolder/*
+!outputfolder/.gitkeep
+tests/inputfolder/
+tests/outputfolder/
 models/
 *.partial
 dist/
