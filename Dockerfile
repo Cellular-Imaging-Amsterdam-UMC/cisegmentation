@@ -1,3 +1,6 @@
+ARG MODEL_CACHE_IMAGE=w_cisegmentation-model-cache:latest
+FROM ${MODEL_CACHE_IMAGE} AS model_cache
+
 FROM python:3.11-slim-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -17,6 +20,8 @@ COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --upgrade pip setuptools wheel \
     && python -m pip install -r /app/requirements.txt
 COPY tools/download_models.py /app/tools/download_models.py
+COPY bundled_models/stardist/ /opt/cisegmentation/models/stardist/
+COPY --from=model_cache /models/ /opt/cisegmentation/models/
 RUN python /app/tools/download_models.py \
     && rm -rf /root/.cache /tmp/*
 COPY cisegmentation/ /app/cisegmentation/

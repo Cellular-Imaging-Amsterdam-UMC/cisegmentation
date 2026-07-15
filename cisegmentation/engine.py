@@ -55,7 +55,7 @@ def run_workflow(
     output_dir.mkdir(parents=True, exist_ok=True)
     stores = discover_ome_zarrs(input_dir)
     if not stores:
-        raise FileNotFoundError(f"No top-level .ome.zarr inputs found in {input_dir}")
+        raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")
     outputs: list[Path] = []
     if settings.benchmark:
         first_resource = enumerate_resources(stores[0])[0]
@@ -73,9 +73,10 @@ def run_workflow(
         results = [
             _segment_image(read_image(resource), settings) for resource in resources
         ]
+        source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
         output_path = (
             output_dir
-            / f"{store.name.removesuffix('.ome.zarr')}_{model_name}_{settings.target}.ome.zarr"
+            / f"{source_name}_{model_name}_{settings.target}.ome.zarr"
         )
         if resources[0].plate_path is None:
             write_label_image(results[0], output_path)

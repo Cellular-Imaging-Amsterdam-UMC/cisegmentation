@@ -11,6 +11,26 @@ from .registry import ModelSpec
 from .settings import SegmentationSettings
 
 
+def _models_root() -> Path:
+    configured = os.environ.get("CISEGMENTATION_MODELS")
+    if configured:
+        return Path(configured)
+    repository_cache = Path(__file__).resolve().parents[1] / "models"
+    if repository_cache.exists():
+        return repository_cache
+    return Path.home() / ".cisegmentation" / "models"
+
+
+def _configure_model_cache() -> Path:
+    root = _models_root()
+    os.environ.setdefault("CISEGMENTATION_MODELS", str(root))
+    os.environ.setdefault("CELLPOSE3_LEGACY_LOCAL_MODELS_PATH", str(root / "cellpose3"))
+    os.environ.setdefault("CELLPOSE_LOCAL_MODELS_PATH", str(root / "cellpose-sam"))
+    os.environ.setdefault("SPOTIFLOW_CACHE_DIR", str(root / "spotiflow"))
+    os.environ.setdefault("SPOTIFLOW_LOCAL_MODELS_PATH", str(root / "spotiflow"))
+    return root
+
+
 def resolve_device(requested: str) -> str:
     requested = str(requested or "auto").lower()
     if requested not in {"auto", "cpu", "cuda"}:
@@ -28,6 +48,64 @@ def _selected_image(czyx: np.ndarray, settings: SegmentationSettings) -> np.ndar
     channels = settings.selected_channels(czyx.shape[0])
     selected = czyx[channels]
     return np.moveaxis(selected, 0, -1)  # Z,Y,X,C
+
+
+def _xy_pixel_sizes_um(
+    scales: dict[str, float], parameter: str
+) -> tuple[float, float]:
+    y_um = float(scales.get("y", float("nan")))
+    x_um = float(scales.get("x", float("nan")))
+    if not np.isfinite(y_um) or y_um <= 0 or not np.isfinite(x_um) or x_um <= 0:
+        raise ValueError(
+            f"{parameter} requires positive XY pixel sizes in OME-Zarr metadata"
+        )
+    return y_um, x_um
+
+
+def _cellpose_diameter_pixels(
+    diameter_um: float, target: str, scales: dict[str, float]
+) -> float | None:
+    if diameter_um < 0:
+        return None
+    resolved_um = diameter_um or (12.0 if target == "nuclei" else 25.0)
+    y_um, x_um = _xy_pixel_sizes_um(scales, "Cellpose diameter")
+    return resolved_um / ((y_um + x_um) / 2.0)
+
+
+def _spotiflow_min_distance_pixels(
+    distance_um: float, scales: dict[str, float]
+) -> int:
+    y_um, x_um = _xy_pixel_sizes_um(scales, "Spotiflow minimum distance")
+    return max(1, int(round(float(distance_um) / ((y_um + x_um) / 2.0))))
+
+
+def _resize_2d(
+    array: np.ndarray, shape: tuple[int, int], *, labels: bool
+) -> np.ndarray:
+    if array.shape == shape:
+        return np.asarray(array)
+    import torch
+    import torch.nn.functional as functional
+
+    tensor = torch.as_tensor(np.asarray(array), dtype=torch.float32)[None, None]
+    kwargs = {"size": shape, "mode": "nearest" if labels else "bilinear"}
+    if not labels:
+        kwargs.update({"align_corners": False, "antialias": True})
+    resized = functional.interpolate(tensor, **kwargs)[0, 0].cpu().numpy()
+    return resized.astype(np.uint32 if labels else np.float32, copy=False)
+
+
+def _stardist_versatile_input(
+    image: np.ndarray, scales: dict[str, float]
+) -> tuple[np.ndarray, tuple[int, int]]:
+    y_um, x_um = _xy_pixel_sizes_um(scales, "StarDist versatile rescaling")
+    original_shape = tuple(image.shape[-2:])
+    factors = (min(1.0, y_um / 0.5), min(1.0, x_um / 0.5))
+    target_shape = tuple(
+        max(1, int(round(size * factor)))
+        for size, factor in zip(original_shape, factors)
+    )
+    return _resize_2d(image, target_shape, labels=False), original_shape
 
 
 def _unique_plane_labels(planes: list[np.ndarray]) -> np.ndarray:
@@ -73,17 +151,30 @@ def points_to_labels(points: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
 
 
 def _segment_cellpose(
-    czyx: np.ndarray, spec: ModelSpec, settings: SegmentationSettings, device: str
+    czyx: np.ndarray,
+    spec: ModelSpec,
+    settings: SegmentationSettings,
+    device: str,
+    scales: dict[str, float],
 ) -> np.ndarray:
+    _configure_model_cache()
     image = _selected_image(czyx, settings)
     gpu = device == "cuda"
     if spec.family == "cellpose3":
+        import torch
+
+        # PyTorch 2.11 warns when the legacy Cellpose implementation relies on
+        # the historical default (checks disabled). Make that choice explicit:
+        # this preserves Cellpose 3 behavior without broadly filtering warnings.
+        torch.sparse.check_sparse_tensor_invariants.disable()
         from cellpose3_legacy import models
     else:
         from cellpose import models
     model = models.CellposeModel(gpu=gpu, pretrained_model=spec.checkpoint)
     kwargs: dict[str, Any] = {
-        "diameter": settings.diameter or None,
+        "diameter": _cellpose_diameter_pixels(
+            settings.diameter, settings.target, scales
+        ),
         "flow_threshold": settings.flow_threshold,
         "cellprob_threshold": settings.cellprob_threshold,
         "channel_axis": -1,
@@ -104,12 +195,7 @@ def _segment_cellpose(
 
 
 def _stardist_model_path(checkpoint: str) -> Path:
-    root = Path(
-        os.environ.get(
-            "CISEGMENTATION_MODELS", Path.home() / ".cisegmentation" / "models"
-        )
-    )
-    return root / "stardist" / checkpoint
+    return _configure_model_cache() / "stardist" / checkpoint
 
 
 def _predict_stardist_tiled(
@@ -144,7 +230,11 @@ def _predict_stardist_tiled(
 
 
 def _segment_stardist(
-    czyx: np.ndarray, spec: ModelSpec, settings: SegmentationSettings, device: str
+    czyx: np.ndarray,
+    spec: ModelSpec,
+    settings: SegmentationSettings,
+    device: str,
+    scales: dict[str, float],
 ) -> np.ndarray:
     from cistardist_pytorch import StarDist2D
 
@@ -158,12 +248,15 @@ def _segment_stardist(
     nms = (
         None if settings.stardist_nms_threshold < 0 else settings.stardist_nms_threshold
     )
-    return _unique_plane_labels(
-        [
-            _predict_stardist_tiled(model, czyx[channel, z], prob, nms)
-            for z in range(czyx.shape[1])
-        ]
-    )
+    planes = []
+    for z_index in range(czyx.shape[1]):
+        plane = czyx[channel, z_index]
+        original_shape = tuple(plane.shape)
+        if spec.checkpoint == "SD_Nuclei_Versatile":
+            plane, original_shape = _stardist_versatile_input(plane, scales)
+        labels = _predict_stardist_tiled(model, plane, prob, nms)
+        planes.append(_resize_2d(labels, original_shape, labels=True))
+    return _unique_plane_labels(planes)
 
 
 def _segment_instanseg(
@@ -178,22 +271,22 @@ def _segment_instanseg(
         )
     from instanseg import InstanSeg
 
-    channels = settings.selected_channels(czyx.shape[0])
+    channels = (
+        list(range(3))
+        if spec.checkpoint == "brightfield_nuclei" and czyx.shape[0] >= 3
+        else settings.selected_channels(czyx.shape[0])
+    )
     if len(channels) < spec.min_channels:
         raise ValueError(
             f"{spec.id} requires at least {spec.min_channels} input channels"
         )
-    model_root = (
-        Path(
-            os.environ.get(
-                "CISEGMENTATION_MODELS", Path.home() / ".cisegmentation" / "models"
-            )
-        )
-        / "instanseg"
-    )
-    try:
-        model = InstanSeg(str(model_root / spec.checkpoint), verbosity=0)
-    except Exception:
+    model_root = _configure_model_cache() / "instanseg"
+    checkpoint = model_root / spec.checkpoint / "instanseg.pt"
+    if checkpoint.exists():
+        import torch
+
+        model = InstanSeg(torch.jit.load(str(checkpoint), map_location="cpu"), verbosity=0)
+    else:
         model = InstanSeg(spec.checkpoint, verbosity=0)
     target_index = (
         1
@@ -216,21 +309,16 @@ def _segment_instanseg(
 
 
 def _segment_spotiflow(
-    czyx: np.ndarray, spec: ModelSpec, settings: SegmentationSettings, device: str
+    czyx: np.ndarray,
+    spec: ModelSpec,
+    settings: SegmentationSettings,
+    device: str,
+    scales: dict[str, float],
 ) -> np.ndarray:
     from spotiflow.model import Spotiflow
 
-    cache = Path(
-        os.environ.get(
-            "SPOTIFLOW_CACHE_DIR",
-            Path(
-                os.environ.get(
-                    "CISEGMENTATION_MODELS", Path.home() / ".cisegmentation" / "models"
-                )
-            )
-            / "spotiflow",
-        )
-    )
+    root = _configure_model_cache()
+    cache = Path(os.environ.get("SPOTIFLOW_CACHE_DIR", root / "spotiflow"))
     model = Spotiflow.from_pretrained(
         spec.checkpoint, cache_dir=cache, map_location=device, verbose=False
     )
@@ -241,6 +329,9 @@ def _segment_spotiflow(
         if settings.spotiflow_prob_threshold < 0
         else settings.spotiflow_prob_threshold
     )
+    min_distance = _spotiflow_min_distance_pixels(
+        settings.spotiflow_min_distance, scales
+    )
     native_3d = (
         volume.shape[0] > 1
         and spec.dimensions == "3d"
@@ -250,7 +341,7 @@ def _segment_spotiflow(
         points, _ = model.predict(
             volume,
             prob_thresh=threshold,
-            min_distance=settings.spotiflow_min_distance,
+            min_distance=min_distance,
             device=device,
             verbose=False,
         )
@@ -261,7 +352,7 @@ def _segment_spotiflow(
                 model.predict(
                     volume[z],
                     prob_thresh=threshold,
-                    min_distance=settings.spotiflow_min_distance,
+                    min_distance=min_distance,
                     device=device,
                     verbose=False,
                 )[0],
@@ -286,13 +377,13 @@ def segment_czyx(
     device = resolve_device(settings.device)
     start = time.perf_counter()
     if spec.family in {"cellpose3", "cellpose-sam"}:
-        labels = _segment_cellpose(czyx, spec, settings, device)
+        labels = _segment_cellpose(czyx, spec, settings, device, scales)
     elif spec.family == "stardist":
-        labels = _segment_stardist(czyx, spec, settings, device)
+        labels = _segment_stardist(czyx, spec, settings, device, scales)
     elif spec.family == "instanseg":
         labels = _segment_instanseg(czyx, spec, settings, scales.get("x", float("nan")))
     elif spec.family == "spotiflow":
-        labels = _segment_spotiflow(czyx, spec, settings, device)
+        labels = _segment_spotiflow(czyx, spec, settings, device, scales)
     else:
         raise ValueError(f"No adapter for model family {spec.family}")
     elapsed = time.perf_counter() - start

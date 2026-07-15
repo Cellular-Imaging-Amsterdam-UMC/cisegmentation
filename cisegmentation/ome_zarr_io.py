@@ -49,13 +49,23 @@ def _attrs(group) -> dict[str, Any]:
 
 
 def discover_ome_zarrs(input_dir: str | Path) -> list[Path]:
+    def is_ngff_store(path: Path) -> bool:
+        if not path.is_dir() or not path.name.lower().endswith(".zarr"):
+            return False
+        attrs_path = path / ".zattrs"
+        try:
+            attrs = json.loads(attrs_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(attrs.get("plate"), dict) or bool(attrs.get("multiscales"))
+
     root = Path(input_dir)
-    if root.name.lower().endswith(".ome.zarr") and root.is_dir():
+    if is_ngff_store(root):
         return [root]
     return sorted(
         path
         for path in root.iterdir()
-        if path.is_dir() and path.name.lower().endswith(".ome.zarr")
+        if is_ngff_store(path)
     )
 
 

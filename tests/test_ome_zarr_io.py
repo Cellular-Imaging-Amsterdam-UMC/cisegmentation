@@ -25,6 +25,16 @@ def test_discover_and_read_staged_ome_zarrs(inputfolder):
     assert image.scales["x"] == 0.5
 
 
+def test_discover_accepts_biomero_zarr_name(tmp_path):
+    store = tmp_path / "renamed-by-biomero.zarr"
+    store.mkdir()
+    (store / ".zattrs").write_text(
+        '{"multiscales":[{"datasets":[{"path":"0"}]}]}', encoding="utf-8"
+    )
+    (store / ".zgroup").write_text('{"zarr_format":2}', encoding="utf-8")
+    assert discover_ome_zarrs(tmp_path) == [store]
+
+
 def test_write_standalone_uint32_label_zarr(inputfolder, outputfolder):
     source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
     labels = np.zeros((1, 1, 1, 64, 64), dtype=np.uint32)

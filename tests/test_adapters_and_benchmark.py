@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from cisegmentation.adapters import _segment_instanseg, points_to_labels
+from cisegmentation.adapters import (
+    _cellpose_diameter_pixels,
+    _segment_instanseg,
+    _spotiflow_min_distance_pixels,
+    _stardist_versatile_input,
+    points_to_labels,
+)
 from cisegmentation.registry import get_model_spec
 from cisegmentation.benchmark import _benchmark_specs, center_crop, run_benchmark
 from cisegmentation.ome_zarr_io import enumerate_resources, read_image
@@ -13,6 +19,26 @@ def test_spotiflow_points_are_unique_single_pixels():
     labels = points_to_labels(points, (10, 10))
     assert np.count_nonzero(labels) == 2
     assert set(np.unique(labels)) == {0, 1, 2}
+
+
+def test_physical_parameters_are_converted_from_ome_zarr_pixel_size():
+    scales = {"y": 0.5, "x": 0.5}
+    assert _cellpose_diameter_pixels(0, "nuclei", scales) == 24
+    assert _cellpose_diameter_pixels(0, "cells", scales) == 50
+    assert _cellpose_diameter_pixels(-1, "nuclei", scales) is None
+    assert _spotiflow_min_distance_pixels(2.0, scales) == 4
+
+
+def test_stardist_versatile_downsamples_finer_than_half_micron():
+    image = np.zeros((80, 100), dtype=np.uint16)
+    resized, original_shape = _stardist_versatile_input(
+        image, {"y": 0.25, "x": 0.4}
+    )
+    assert original_shape == (80, 100)
+    assert resized.shape == (40, 80)
+
+    unchanged, _ = _stardist_versatile_input(image, {"y": 0.5, "x": 0.7})
+    assert unchanged.shape == image.shape
 
 
 def test_center_crop_is_centered_and_at_most_1024():

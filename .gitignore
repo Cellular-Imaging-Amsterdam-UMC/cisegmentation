@@ -10,7 +10,9 @@ outputfolder/*
 !outputfolder/.gitkeep
 tests/inputfolder/
 tests/outputfolder/
-models/
+models/*
+!models/.gitkeep
+.docker-model-context/
 *.partial
 dist/
 build/

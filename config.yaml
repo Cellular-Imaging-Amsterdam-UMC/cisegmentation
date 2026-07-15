@@ -127,7 +127,6 @@ parameters:
   mode: beginner
 - {name: primary_channel, type: integer, label: Primary Channel, description: One-based primary signal channel., default: 1, minimum: 1, cli_tag: --primary-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
 - {name: nuclei_channel, type: integer, label: Nuclei Channel, description: Optional one-based nuclei channel; use 0 for none., default: 0, minimum: 0, cli_tag: --nuclei-channel, cli_order: 13, optional: true, section_id: essential, mode: beginner}
-- {name: input_channels, type: textbox, label: Model Input Channels, description: Optional comma-separated one-based channels in model input order. Leave empty to use Primary Channel and optional Nuclei Channel., default: '', cli_tag: --input-channels, cli_order: 14, optional: true, section_id: advanced, mode: advanced}
 - name: device
   type: dropdown
   label: Compute Device
@@ -152,13 +151,13 @@ parameters:
   optional: true
   section_id: advanced
   mode: advanced
-- {name: diameter, type: float, label: Cellpose Diameter, description: Diameter in pixels; 0 uses model default., default: 0.0, minimum: 0.0, cli_tag: --diameter, cli_order: 20, optional: true, section_id: advanced, mode: advanced}
+- {name: diameter, type: float, label: Cellpose Diameter (µm), description: Expected object diameter in µm, converted using OME-Zarr XY pixel size. 0 uses 12 µm for nuclei or 25 µm for cells; -1 uses the model default., default: 0.0, minimum: -1.0, cli_tag: --diameter, cli_order: 20, optional: true, section_id: advanced, mode: advanced}
 - {name: cellprob_threshold, type: float, label: Cellpose Probability Threshold, description: Cellpose cell probability threshold., default: 0.0, cli_tag: --cellprob-threshold, cli_order: 21, optional: true, section_id: advanced, mode: advanced}
 - {name: flow_threshold, type: float, label: Cellpose Flow Threshold, description: Cellpose flow error threshold., default: 0.4, minimum: 0.0, cli_tag: --flow-threshold, cli_order: 22, optional: true, section_id: advanced, mode: advanced}
-- {name: stardist_prob_threshold, type: float, label: StarDist Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --stardist-prob-threshold, cli_order: 23, optional: true, section_id: advanced, mode: advanced}
-- {name: stardist_nms_threshold, type: float, label: StarDist NMS Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --stardist-nms-threshold, cli_order: 24, optional: true, section_id: advanced, mode: advanced}
+- {name: stardist_prob_threshold, type: float, label: StarDist Probability Threshold, description: Object probability threshold. Use -1 to read the model-specific prob value from thresholds.json., default: -1.0, cli_tag: --stardist-prob-threshold, cli_order: 23, optional: true, section_id: advanced, mode: advanced}
+- {name: stardist_nms_threshold, type: float, label: StarDist NMS Threshold, description: Non-maximum-suppression overlap threshold. Use -1 to read the model-specific nms value from thresholds.json., default: -1.0, cli_tag: --stardist-nms-threshold, cli_order: 24, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_prob_threshold, type: float, label: Spotiflow Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --spotiflow-prob-threshold, cli_order: 26, optional: true, section_id: advanced, mode: advanced}
-- {name: spotiflow_min_distance, type: integer, label: Spotiflow Minimum Distance, description: Minimum detected-point separation., default: 1, minimum: 1, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: advanced, mode: advanced}
+- {name: spotiflow_min_distance, type: float, label: Spotiflow Minimum Distance (µm), description: Minimum detected-point separation in µm, converted using OME-Zarr XY pixel size., default: 1.0, minimum: 0.0, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: advanced, mode: advanced}
 - {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Run selected models on first T and a centered maximum 1024x1024 ROI; write one rendered 2D XY RGB OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 30, optional: true, append_value: true, section_id: benchmark, mode: beginner}
 - name: benchmark_models
   type: dropdown

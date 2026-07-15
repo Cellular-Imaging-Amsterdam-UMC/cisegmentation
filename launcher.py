@@ -14,13 +14,14 @@ if sys.platform == "win32":
         "ci.w_cisegmentation.bilayers_launcher"
     )
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtCore import QProcess, Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QIcon, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -44,6 +45,98 @@ ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "config.yaml"
 ICON = ROOT / "gui" / "icon.svg"
 SETTINGS = ROOT / ".last_launcher_settings.json"
+
+
+def build_roundtrip_command(
+    values: dict, input_dir: str, output_dir: str, gpu: bool = True
+) -> list[str]:
+    from cisegmentation.roundtrip import roundtrip_command
+
+    return roundtrip_command(
+        sys.executable,
+        ROOT / "tools" / "omero_roundtrip.py",
+        input_dir,
+        output_dir,
+        values,
+        gpu,
+    )
+
+
+class RoundtripDialog(QDialog):
+    roundtripFinished = pyqtSignal(int)
+
+    def __init__(self, command: list[str], parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("OMERO Roundtrip")
+        self.setWindowIcon(QIcon(str(ICON)))
+        self.resize(820, 520)
+        self.job_id: str | None = None
+        self.process = QProcess(self)
+        self.process.setWorkingDirectory(str(ROOT))
+        self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+
+        layout = QVBoxLayout(self)
+        self.status = QLabel("Starting roundtrip…")
+        layout.addWidget(self.status)
+        self.output = QTextEdit(readOnly=True)
+        self.output.setFont(QFont("Consolas", 9))
+        layout.addWidget(self.output)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_roundtrip)
+        buttons.addWidget(self.cancel_button)
+        self.close_button = QPushButton("Close")
+        self.close_button.setEnabled(False)
+        self.close_button.clicked.connect(self.accept)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+
+        self.process.readyReadStandardOutput.connect(self._read_output)
+        self.process.finished.connect(self._finished)
+        self.process.errorOccurred.connect(self._error)
+        self.process.start(command[0], command[1:])
+
+    def _read_output(self) -> None:
+        text = bytes(self.process.readAllStandardOutput()).decode(errors="replace")
+        if not text:
+            return
+        self.output.moveCursor(QTextCursor.MoveOperation.End)
+        self.output.insertPlainText(text)
+        self.output.ensureCursorVisible()
+        for line in text.splitlines():
+            if line.startswith("PHASE:"):
+                self.status.setText(line.removeprefix("PHASE:").strip())
+            elif line.startswith("SLURM_JOB_ID:"):
+                self.job_id = line.split(":", 1)[1].strip()
+                self.status.setText(f"Slurm job {self.job_id} is running")
+
+    def _finished(self, exit_code: int, _status: QProcess.ExitStatus) -> None:
+        self._read_output()
+        self.status.setText(
+            "Roundtrip completed successfully."
+            if exit_code == 0
+            else f"Roundtrip stopped with exit code {exit_code}. See the log folder for details."
+        )
+        self.cancel_button.setEnabled(False)
+        self.close_button.setEnabled(True)
+        self.roundtripFinished.emit(exit_code)
+
+    def _error(self, error: QProcess.ProcessError) -> None:
+        self.output.append(f"\nCould not run roundtrip process: {error.name}")
+
+    def cancel_roundtrip(self) -> None:
+        self.cancel_button.setEnabled(False)
+        self.status.setText("Cancelling; OMERO and Slurm data will be retained…")
+        if self.job_id:
+            subprocess.Popen(["docker", "exec", "slurmctld", "scancel", self.job_id])
+        self.process.terminate()
+
+    def reject(self) -> None:
+        if self.process.state() != QProcess.ProcessState.NotRunning:
+            self.cancel_roundtrip()
+            return
+        super().reject()
 
 
 class MultiSelectList(QListWidget):
@@ -117,7 +210,10 @@ def build_docker_command(
     config: dict, values: dict, input_dir: str, output_dir: str, gpu: bool = True
 ) -> list[str]:
     image = config["docker_image"]
-    image_name = f"{image['org']}/{image['name']}:{image.get('tag', 'latest')}"
+    # The desktop launcher runs the image produced by builddocker.cmd. The
+    # organization-qualified image in config.yaml remains the BIOMERO registry
+    # identity and must not make local Docker runs pull from Docker Hub.
+    image_name = f"{image['name']}:{image.get('tag', 'latest')}"
     command = ["docker", "run", "--rm"]
     if gpu:
         command += ["--gpus", "all"]
@@ -154,6 +250,8 @@ class Window(QMainWindow):
         super().__init__()
         self.config = load_config()
         self.widgets: dict[str, QWidget] = {}
+        self.run_buttons: list[QPushButton] = []
+        self.roundtrip_dialog: RoundtripDialog | None = None
         self.setWindowTitle("CI Segmentation - Bilayers Launcher")
         self.setWindowIcon(QIcon(str(ICON)))
         self.setMinimumWidth(960)
@@ -230,10 +328,19 @@ class Window(QMainWindow):
         )
         run_local.clicked.connect(self.run_local)
         buttons.addWidget(run_local)
+        self.run_buttons.append(run_local)
         run_docker = QPushButton("Run Docker")
         run_docker.setToolTip("Run the configured container image with Docker.")
         run_docker.clicked.connect(self.run_docker)
         buttons.addWidget(run_docker)
+        self.run_buttons.append(run_docker)
+        run_roundtrip = QPushButton("Run OMERO Roundtrip")
+        run_roundtrip.setToolTip(
+            "Build the local image and run the first OME-Zarr through OMERO, BIOMERO and Slurm."
+        )
+        run_roundtrip.clicked.connect(self.run_roundtrip)
+        buttons.addWidget(run_roundtrip)
+        self.run_buttons.append(run_roundtrip)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
         buttons.addWidget(close)
@@ -355,6 +462,14 @@ class Window(QMainWindow):
             self.output_path.text(),
         )
 
+    def roundtrip_command(self) -> list[str]:
+        return build_roundtrip_command(
+            self.values(),
+            self.input_path.text(),
+            self.output_path.text(),
+            self.gpu.isChecked(),
+        )
+
     def command(self) -> list[str]:
         """Return the Docker command for backward compatibility."""
         return self.docker_command()
@@ -365,6 +480,8 @@ class Window(QMainWindow):
             + subprocess.list2cmdline(self.docker_command())
             + "\n\nLocal Python:\n"
             + subprocess.list2cmdline(self.local_command())
+            + "\n\nOMERO roundtrip:\n"
+            + subprocess.list2cmdline(self.roundtrip_command())
         )
 
     def run_docker(self) -> None:
@@ -374,6 +491,18 @@ class Window(QMainWindow):
     def run_local(self) -> None:
         self.save()
         subprocess.Popen(self.local_command(), cwd=ROOT)
+
+    def run_roundtrip(self) -> None:
+        self.save()
+        for button in self.run_buttons:
+            button.setEnabled(False)
+        self.roundtrip_dialog = RoundtripDialog(self.roundtrip_command(), self)
+        self.roundtrip_dialog.roundtripFinished.connect(self._roundtrip_finished)
+        self.roundtrip_dialog.show()
+
+    def _roundtrip_finished(self, _result: int) -> None:
+        for button in self.run_buttons:
+            button.setEnabled(True)
 
     def save(self) -> None:
         SETTINGS.write_text(

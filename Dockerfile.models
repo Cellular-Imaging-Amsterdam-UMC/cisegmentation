@@ -1,0 +1,5 @@
+FROM scratch
+
+ARG MODEL_CACHE_ID
+LABEL org.cisegmentation.model-cache-id=${MODEL_CACHE_ID}
+COPY models/ /models/

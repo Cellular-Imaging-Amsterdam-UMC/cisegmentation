@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import time
 import urllib.request
 import zipfile
 
@@ -67,6 +68,33 @@ CUSTOM_STARDIST = {
 }
 
 
+def _cache_inventory(root: Path) -> dict[str, int]:
+    """Return a cheap, stable inventory used to avoid touching a complete cache."""
+    return {
+        path.relative_to(root).as_posix(): path.stat().st_size
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+        and path.name not in {".complete.json", ".complete.json.partial"}
+        and not path.name.endswith(".partial")
+    }
+
+
+def _complete_cache_state(root: Path) -> dict | None:
+    marker = root / ".complete.json"
+    if not marker.is_file():
+        return None
+    try:
+        state = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if state.get("schema") != 2 or state.get("custom_stardist_commit") != CUSTOM_COMMIT:
+        return None
+    inventory = state.get("inventory")
+    if not isinstance(inventory, dict) or inventory != _cache_inventory(root):
+        return None
+    return state
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -82,10 +110,29 @@ def _download(url: str, destination: Path, expected_sha256: str | None = None) -
         destination.unlink()
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".partial")
-    if temporary.exists():
-        temporary.unlink()
     print(f"Downloading {url}")
-    urllib.request.urlretrieve(url, temporary)
+    last_error: Exception | None = None
+    for attempt in range(1, 6):
+        try:
+            offset = temporary.stat().st_size if temporary.exists() else 0
+            request = urllib.request.Request(
+                url, headers={"Range": f"bytes={offset}-"} if offset else {}
+            )
+            with urllib.request.urlopen(request, timeout=120) as response:
+                append = offset > 0 and getattr(response, "status", None) == 206
+                with temporary.open("ab" if append else "wb") as stream:
+                    shutil.copyfileobj(response, stream, length=1024 * 1024)
+            last_error = None
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt == 5:
+                break
+            delay = min(30, 2**attempt)
+            print(f"Download attempt {attempt}/5 failed: {exc}; retrying in {delay}s")
+            time.sleep(delay)
+    if last_error is not None:
+        raise RuntimeError(f"Download failed after 5 attempts: {url}") from last_error
     if temporary.stat().st_size == 0:
         raise RuntimeError(f"Empty download: {url}")
     if expected_sha256 is not None:
@@ -99,6 +146,8 @@ def _download(url: str, destination: Path, expected_sha256: str | None = None) -
 
 
 def _download_instanseg(root: Path) -> dict:
+    import torch
+
     state = {}
     for name, url in INSTANSEG_MODELS.items():
         destination = root / "instanseg" / name
@@ -123,7 +172,11 @@ def _download_instanseg(root: Path) -> dict:
             else:
                 shutil.move(str(extracted), str(destination))
                 shutil.rmtree(temporary)
-        state[name] = _sha256(marker)
+        checkpoint = destination / "instanseg.pt"
+        if not checkpoint.exists() or checkpoint.stat().st_size == 0:
+            raise RuntimeError(f"InstanSeg archive {name} did not contain instanseg.pt")
+        torch.jit.load(str(checkpoint), map_location="cpu")
+        state[name] = _sha256(checkpoint)
     return state
 
 
@@ -152,12 +205,31 @@ def _download_cellpose(root: Path) -> dict:
 def _download_stardist(root: Path) -> dict:
     destination = root / "stardist"
     destination.mkdir(parents=True, exist_ok=True)
+    bundled = Path(__file__).resolve().parents[1] / "bundled_models" / "stardist"
+    if bundled.exists():
+        shutil.copytree(bundled, destination, dirs_exist_ok=True)
     versatile = destination / "SD_Nuclei_Versatile"
     if not (versatile / "SD_Nuclei_Versatile.pt").exists():
         from cistardist_pytorch.cli import _download_doi
 
         versatile.mkdir(parents=True, exist_ok=True)
-        _download_doi("10.5281/zenodo.20038194", versatile)
+        last_error: Exception | None = None
+        for attempt in range(1, 6):
+            try:
+                _download_doi("10.5281/zenodo.20038194", versatile)
+                checkpoint = versatile / "SD_Nuclei_Versatile.pt"
+                if not checkpoint.exists() or checkpoint.stat().st_size == 0:
+                    raise RuntimeError("Zenodo download did not produce SD_Nuclei_Versatile.pt")
+                last_error = None
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 5:
+                    delay = min(60, 5 * 2 ** (attempt - 1))
+                    print(f"StarDist DOI attempt {attempt}/5 failed: {exc}; retrying in {delay}s")
+                    time.sleep(delay)
+        if last_error is not None:
+            raise RuntimeError("Could not download SD_Nuclei_Versatile after 5 attempts") from last_error
     from cistardist_pytorch import StarDist2D
     from cistardist_pytorch.converter import convert_model_folder
 
@@ -208,13 +280,18 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     args.models_dir.mkdir(parents=True, exist_ok=True)
-    state = {"schema": 1, "custom_stardist_commit": CUSTOM_COMMIT}
+    if not args.skip_cellpose and not args.skip_spotiflow:
+        if _complete_cache_state(args.models_dir) is not None:
+            print(f"Model cache already complete: {args.models_dir}")
+            return 0
+    state = {"schema": 2, "custom_stardist_commit": CUSTOM_COMMIT}
     if not args.skip_cellpose:
         state["cellpose"] = _download_cellpose(args.models_dir)
     state["stardist"] = _download_stardist(args.models_dir)
     state["instanseg"] = _download_instanseg(args.models_dir)
     if not args.skip_spotiflow:
         state["spotiflow"] = _download_spotiflow(args.models_dir)
+    state["inventory"] = _cache_inventory(args.models_dir)
     temporary = args.models_dir / ".complete.json.partial"
     temporary.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     temporary.replace(args.models_dir / ".complete.json")

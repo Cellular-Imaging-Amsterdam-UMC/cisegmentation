@@ -9,7 +9,10 @@ def test_bilayers_config_is_structurally_valid():
     assert validate_config(config) == []
     parameters = {item["name"]: item for item in config["parameters"]}
     assert "instanseg_pixel_size_um" not in parameters
+    assert "input_channels" not in parameters
     assert parameters["diameter"]["mode"] == "advanced"
+    assert parameters["diameter"]["minimum"] == -1.0
+    assert parameters["spotiflow_min_distance"]["type"] == "float"
     benchmark = parameters["benchmark_models"]
     assert benchmark["multiselect"] is False
     assert [option["value"] for option in benchmark["options"]] == [

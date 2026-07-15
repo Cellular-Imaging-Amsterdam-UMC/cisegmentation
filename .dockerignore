@@ -4,7 +4,6 @@
 .ruff_cache
 __pycache__
 *.pyc
-models
 outputs
 inputfolder
 outputfolder
@@ -14,3 +13,5 @@ dist
 build
 *.egg-info
 tools/omero_import_metadata_probe/reports
+cisegmentation/roundtrip.py
+models

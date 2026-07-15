@@ -37,6 +37,8 @@ def test_local_and_docker_commands_share_workflow_parameters():
     assert local[local.index("--model") + 1] == "stardist:SD_Foci_Finn"
     assert "docker" not in local
     assert docker[:3] == ["docker", "run", "--rm"]
+    assert "w_cisegmentation:latest" in docker
+    assert "cellularimagingcf/w_cisegmentation:latest" not in docker
     assert docker[docker.index("--model") + 1] == "stardist:SD_Foci_Finn"
 
 

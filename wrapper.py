@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 from cisegmentation.engine import run_workflow
 from cisegmentation.settings import SegmentationSettings
@@ -48,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = time.perf_counter()
     args, unknown = build_parser().parse_known_args(argv)
     values = {}
     if args.parameters:
@@ -63,9 +65,14 @@ def main(argv: list[str] | None = None) -> int:
         outputs = run_workflow(args.input_dir, args.output_dir, settings)
     except Exception as exc:
         print(f"CI segmentation failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(
+            f"CI segmentation failed after {time.perf_counter() - started:.2f} seconds.",
+            file=sys.stderr,
+        )
         return 1
     for output in outputs:
         print(f"Output: {output}")
+    print(f"CI segmentation completed in {time.perf_counter() - started:.2f} seconds.")
     return 0
 
 

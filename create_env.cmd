@@ -16,4 +16,8 @@ if errorlevel 1 exit /b 1
 "%CONDA_EXE%" run -n cisegmentation python -m pip install -r "%~dp0requirements_launcher.txt"
 if errorlevel 1 exit /b 1
 "%CONDA_EXE%" run -n cisegmentation python "%~dp0tools\cuda_smoke.py"
+if errorlevel 1 exit /b 1
+set "CISEGMENTATION_MODELS=%~dp0models"
+"%CONDA_EXE%" run -n cisegmentation python "%~dp0tools\download_models.py" --models-dir "%~dp0models"
+if errorlevel 1 exit /b 1
 endlocal

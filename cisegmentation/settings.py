@@ -10,7 +10,6 @@ class SegmentationSettings:
     target: str = "nuclei"
     primary_channel: int = 1
     nuclei_channel: int = 0
-    input_channels: str = ""
     device: str = "auto"
     dimension_mode: str = "auto"
     diameter: float = 0.0
@@ -19,7 +18,7 @@ class SegmentationSettings:
     stardist_prob_threshold: float = -1.0
     stardist_nms_threshold: float = -1.0
     spotiflow_prob_threshold: float = -1.0
-    spotiflow_min_distance: int = 1
+    spotiflow_min_distance: float = 1.0
     benchmark: bool = False
     benchmark_models: str = "all"
 
@@ -27,13 +26,9 @@ class SegmentationSettings:
         return asdict(self)
 
     def selected_channels(self, channel_count: int) -> list[int]:
-        if self.input_channels.strip():
-            raw = self.input_channels.replace(";", ",").split(",")
-            channels = [int(value.strip()) - 1 for value in raw if value.strip()]
-        else:
-            channels = [self.primary_channel - 1]
-            if self.nuclei_channel > 0 and self.nuclei_channel != self.primary_channel:
-                channels.append(self.nuclei_channel - 1)
+        channels = [self.primary_channel - 1]
+        if self.nuclei_channel > 0 and self.nuclei_channel != self.primary_channel:
+            channels.append(self.nuclei_channel - 1)
         if not channels or any(
             index < 0 or index >= channel_count for index in channels
         ):
