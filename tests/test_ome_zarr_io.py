@@ -37,7 +37,9 @@ def test_discover_accepts_biomero_zarr_name(tmp_path):
 
 def test_write_standalone_int32_label_zarr(inputfolder, outputfolder):
     source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
-    labels = np.zeros((1, 1, 1, 64, 64), dtype=np.uint32)
+    labels = np.zeros(
+        (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+    )
     labels[0, 0, 0, 10:20, 10:20] = 7
     result = LabelResult(labels, source, "stardist:SD_Nuclei_Versatile", "nuclei")
     output = write_label_image(result, outputfolder / "labels.ome.zarr")
@@ -80,6 +82,53 @@ def test_label_writer_rejects_ids_outside_int32_range(inputfolder, outputfolder)
     result = LabelResult(labels, source, "test", "nuclei")
     with pytest.raises(OverflowError, match="exceeds QuPath-compatible int32"):
         write_label_image(result, outputfolder / "overflow.ome.zarr")
+
+
+def test_writer_can_prepend_original_channels_without_changing_labels(
+    inputfolder, outputfolder
+):
+    source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
+    labels = np.zeros(
+        (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+    )
+    labels[0, 0, 0, 10:20, 10:20] = 7
+    result = LabelResult(
+        labels,
+        source,
+        "test",
+        "nuclei",
+        channel_labels=["nuclei"],
+        include_original_channels=True,
+    )
+    output = write_label_image(result, outputfolder / "original-and-labels.ome.zarr")
+    root = zarr.open_group(str(output), mode="r")
+    assert root["0"].dtype == np.dtype("int32")
+    assert root["0"].shape[1] == source.data.shape[1] + 1
+    np.testing.assert_array_equal(root["0"][:, : source.data.shape[1]], source.data)
+    np.testing.assert_array_equal(root["0"][:, -1:], labels.astype(np.int32))
+    channels = root.attrs["omero"]["channels"]
+    assert "lookupTable" not in channels[0]
+    assert channels[-1]["lookupTable"] == "glasbey_inverted.lut"
+
+
+def test_included_float_channels_are_rounded_to_int32(inputfolder, outputfolder):
+    source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
+    source.data = source.data.astype(np.float32) + np.float32(0.6)
+    source.source_dtype = "float32"
+    labels = np.zeros(
+        (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+    )
+    result = LabelResult(
+        labels, source, "test", "nuclei", include_original_channels=True
+    )
+    output = write_label_image(result, outputfolder / "float-original.ome.zarr")
+    root = zarr.open_group(str(output), mode="r")
+    np.testing.assert_array_equal(
+        root["0"][:, : source.data.shape[1]], np.rint(source.data).astype(np.int32)
+    )
+    metadata = root.attrs["cisegmentation"]
+    assert metadata["original_source_dtype"] == "float32"
+    assert metadata["original_channels_conversion"] == "round-to-nearest-int32"
 
 
 def test_write_multichannel_benchmark_gallery(inputfolder, outputfolder):

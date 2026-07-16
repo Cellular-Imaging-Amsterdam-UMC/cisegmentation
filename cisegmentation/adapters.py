@@ -400,8 +400,11 @@ def _segment_spotiflow(
         spec.id,
         device,
         lambda: __import__("spotiflow.model", fromlist=["Spotiflow"]).Spotiflow,
-        lambda Spotiflow: Spotiflow.from_pretrained(
-            spec.checkpoint, cache_dir=cache, map_location=device, verbose=False
+        lambda Spotiflow: Spotiflow.from_folder(
+            cache / spec.checkpoint,
+            inference_mode=True,
+            which="best",
+            map_location=device,
         ),
     )
     inference_started = time.perf_counter()

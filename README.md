@@ -39,7 +39,8 @@ For a direct local run after activating the environment:
 
 ```powershell
 python wrapper.py --infolder inputfolder --outfolder outputfolder `
-  --model cellpose3:nuclei --target nuclei --device cuda
+  --cell-step true --cell-model cellpose3:cyto3 `
+  --cell-channel 3 --cell-nuclei-channel 1 --device cuda
 ```
 
 Benchmark example:
@@ -64,15 +65,13 @@ converted internally using the OME-Zarr XY scale metadata.
 
 | Parameter | Use |
 | --- | --- |
-| Model (`--model`) | Stable model/checkpoint identifier to run. |
-| Segmentation Target (`--target`) | Required biological output: nuclei, cells, foci, or spots. The selected model must support it. |
-| Primary Channel (`--primary-channel`) | Main signal channel. |
-| Nuclei Channel (`--nuclei-channel`) | Optional nuclei channel for cell models; `0` means none. The InstanSeg brightfield model automatically consumes the first three channels. |
-| Multi-step Segmentation (`--multi-step`) | Enables the optional cell, nucleus, and repeated spot-channel pipeline. The original Model/Target/Primary Channel fields are used only when this is off. |
-| Segment Cells / Cell Model / Cell Signal Channel | Runs a cell model using its one-based primary signal channel and optional Cell-step Nuclei Channel (`0` means none). |
-| Segment Nuclei / Nucleus Model / Nucleus Signal Channel | Independently segments nuclei. When the cell step is also enabled, nuclei are matched to cells by overlap; the largest nucleus is retained and cells without nuclei are removed. |
-| Segment Spots/Foci / Spot/Foci Model / Spot Channels | Runs a Spotiflow model, either `SD_Foci_*` StarDist model, or a Cellpose 3 checkpoint containing `bact` once per comma-separated one-based channel. Entries are not deduplicated, so `2,2` creates two label channels. StarDist channels are named `foci`, Cellpose bacterial channels are named `bacteria`, and a Cellpose diameter of `0` uses the bacterial model default. |
-| Derive Cytoplasm (`--derive-cytoplasm`) | Adds a cytoplasm channel containing matched cell masks minus their matched nucleus masks. Cell, nucleus, and cytoplasm gray-value IDs correspond. |
+| Step 1: Cell Detection (`--cell-step`) | The only detection step enabled by default. It can use deep-learning cell segmentation or nucleus-seeded cell expansion. |
+| Step 1 Method (`--cell-method`) | `deep-learning` uses the selected cell model. `cell-expansion` first segments nuclei from the Step 1 primary channel, then expands each nucleus to its nearest-label territory. |
+| Step 1 Cell Model / Primary Channel / Optional Nuclei Channel / Nucleus Model | Selects the deep-learning cell model and one-based cell/cytoplasm signal channel. When the optional nuclei channel is greater than zero, it is both supplied to the cell model and segmented with the Step 1 nucleus model; cells without a matched nucleus are removed and cell, nucleus, and cytoplasm channels are written with shared IDs. `0` produces cell labels only. |
+| Step 1 Expansion Nucleus Model / Distance | Selects the nucleus seed model and maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
+| Step 2: Nuclei Detection / Model / Channel | Optionally segments nuclei independently. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained and cells without nuclei are removed. Cytoplasm is then always written as cell minus nucleus, with corresponding gray-value IDs. |
+| Step 3a–3d: Foci Detection / Model / Channel | Up to four independent one-based channels, each with its own Spotiflow, `SD_Foci_*` StarDist, or Cellpose 3 `bact` model. Repeating a channel is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
+| Include Original Data Channels (`--include-original-channels`) | Prepends all source channels before the label channels. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
 | Remove Border Cells (`--remove-border-cells`) | Removes cells touching an XY image edge and propagates removal to matched nuclei and derived cytoplasm. Z-stack endpoints are not treated as image borders. |
 | Compute Device (`--device`) | `auto` selects CUDA when available; `cuda` requires a GPU; `cpu` forces CPU inference. |
 | Dimension Mode (`--dimension-mode`) | `auto` uses native 3D where supported; `slice-2d` independently segments and relabels every Z plane. |
@@ -102,6 +101,12 @@ requests OMERO's `glasbey_inverted.lut`; its value zero is black. Because NGFF
 non-black semantic fallback colors. The launcher OMERO roundtrip explicitly
 applies and saves the Glasbey LUT after BIOMERO imports each result.
 
+Normal inference always uses this optional-step workflow; there is no separate
+single-model mode. If Cell Detection, Nuclei Detection, and all four Foci
+Detection slots are disabled, the workflow stops with a clear validation
+error. Original data channels do not receive the Glasbey label LUT and retain
+their source names, colors, and display windows when those are available.
+
 ## Performance and timing provenance
 
 Loaded models are cached for the lifetime of one `wrapper.py` process using
@@ -127,6 +132,21 @@ registered Cellpose 3 models, Cellpose-SAM, `SD_Nuclei_Versatile`,
 Spotiflow models. The three StarDist source folders are bundled from the pinned
 `cistardist_pytorch` models and converted to PyTorch checkpoints only when the
 corresponding `.pt` file is missing.
+
+After successful CPU smoke-loading, the downloader removes Spotiflow download
+ZIPs and training-only `last.pt` checkpoints; runtime loads the extracted
+`best.pt` folders directly and therefore remains offline. StarDist Keras H5
+conversion sources are likewise removed after the converted `.pt` checkpoint
+has loaded successfully. The completion inventory is written only after this
+cleanup, so interrupted or invalid caches are repaired on the next run.
+
+The headless image removes Triton after installing the pinned PyTorch stack.
+Triton is used by `torch.compile`/Inductor, while this inference-only workflow
+uses eager PyTorch execution. GPU smoke tests cover Cellpose 3, Cellpose-SAM,
+StarDist, InstanSeg, and Spotiflow without it. The NVIDIA CUDA runtime packages
+remain installed because PyTorch 2.11 links against them directly, including
+cuDNN, cuBLAS, cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuSPARSELt, NCCL, NVSHMEM,
+CUPTI, NVJitLink, and cuFile.
 
 `builddocker.cmd` updates this host cache before building: valid files are
 reused and only absent or invalid artifacts are downloaded. It creates a local,

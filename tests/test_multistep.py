@@ -48,7 +48,7 @@ def test_border_cell_removal_propagates_to_nucleus_and_cytoplasm():
     assert last_id == 1
 
 
-def test_multistep_produces_compartment_and_repeated_spot_channels(monkeypatch):
+def test_multistep_produces_compartment_and_independent_foci_channels(monkeypatch):
     image = SimpleNamespace(
         data=np.zeros((1, 3, 1, 5, 5), dtype=np.uint8),
         scales={"x": 0.5, "y": 0.5},
@@ -78,7 +78,13 @@ def test_multistep_produces_compartment_and_repeated_spot_channels(monkeypatch):
     monkeypatch.setattr(engine, "segment_czyx", fake_segment)
     result = engine._segment_multistep_image(
         image,
-        SegmentationSettings(multi_step=True, spot_channels="2,2"),
+        SegmentationSettings(
+            nucleus_step=True,
+            foci_step_1=True,
+            foci_channel_1=2,
+            foci_step_2=True,
+            foci_channel_2=2,
+        ),
         startup_seconds=0.4,
         zarr_read_seconds=0.6,
     )
@@ -88,8 +94,8 @@ def test_multistep_produces_compartment_and_repeated_spot_channels(monkeypatch):
         "cells",
         "nuclei",
         "cytoplasm",
-        "spots channel 2 (1)",
-        "spots channel 2 (2)",
+        "spots channel 2 (3a)",
+        "spots channel 2 (3b)",
     ]
     assert calls == [("cells", 3), ("nuclei", 1), ("spots", 2), ("spots", 2)]
     assert result.provenance["timings"]["inference_seconds"] == 1.2
@@ -120,7 +126,7 @@ def test_multistep_spot_model_dispatch_rejects_unrelated_models(model_id):
         engine._spot_model_dispatch(model_id)
 
 
-def test_bacterial_spot_step_uses_supported_target_and_model_diameter(monkeypatch):
+def test_bacterial_foci_step_uses_supported_target_and_model_diameter(monkeypatch):
     image = SimpleNamespace(
         data=np.zeros((1, 1, 1, 5, 5), dtype=np.uint8),
         scales={"x": 0.5, "y": 0.5},
@@ -140,15 +146,61 @@ def test_bacterial_spot_step_uses_supported_target_and_model_diameter(monkeypatc
     result = engine._segment_multistep_image(
         image,
         SegmentationSettings(
-            multi_step=True,
             cell_step=False,
             nucleus_step=False,
-            spot_step=True,
-            spot_model="cellpose3:bact_phase_cp3",
-            spot_channels=[1],
+            foci_step_1=True,
+            foci_model_1="cellpose3:bact_phase_cp3",
+            foci_channel_1=1,
             diameter=0,
         ),
     )
 
     assert observed == {"target": "cells", "diameter": -1.0}
-    assert result.channel_labels == ["bacteria channel 1 (1)"]
+    assert result.channel_labels == ["bacteria channel 1 (3a)"]
+
+
+def test_fast_cell_expansion_uses_physical_xy_distance():
+    nuclei = np.zeros((1, 5, 7), dtype=np.uint32)
+    nuclei[0, 2, 3] = 9
+    cells = engine._expand_nuclei_to_cells(
+        nuclei, distance_um=1.0, scales={"y": 1.0, "x": 0.5}
+    )
+    assert cells[0, 2, 1] == 9  # two X pixels are 1 µm
+    assert cells[0, 0, 3] == 0  # two Y pixels are 2 µm
+
+
+def test_step1_optional_nuclei_channel_creates_consistent_compartments(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((1, 3, 1, 5, 5), dtype=np.uint8),
+        scales={"x": 0.5, "y": 0.5},
+    )
+    calls = []
+
+    def fake_segment(czyx, spec, settings, scales):
+        calls.append((settings.target, settings.primary_channel, spec.id))
+        labels = np.zeros((1, 5, 5), dtype=np.uint32)
+        if settings.target == "cells":
+            labels[0, 1:4, 1:4] = 8
+        else:
+            labels[0, 2, 2] = 3
+        return labels, {
+            "device": "cpu",
+            "runtime_seconds": 0.0,
+            "model_cache_hit": False,
+            "timings": {},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    result = engine._segment_multistep_image(image, SegmentationSettings())
+    assert result.channel_labels == ["cells", "nuclei", "cytoplasm"]
+    assert calls == [
+        ("cells", 3, "cellpose3:cyto3"),
+        ("nuclei", 1, "cellpose3:nuclei"),
+    ]
+    assert set(np.unique(result.labels[:, 0])) == {0, 1}
+    assert set(np.unique(result.labels[:, 1])) == {0, 1}
+
+
+def test_no_enabled_steps_is_rejected():
+    with pytest.raises(ValueError, match="Select at least one segmentation step"):
+        SegmentationSettings(cell_step=False).validate_steps()

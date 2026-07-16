@@ -20,10 +20,6 @@ from .registry import get_model_spec
 from .settings import SegmentationSettings
 
 
-def _safe_model_name(model_id: str) -> str:
-    return model_id.replace(":", "_").replace("/", "_")
-
-
 def _aggregate_timings(records: list[dict[str, float]]) -> dict[str, float]:
     keys = {
         "startup_seconds",
@@ -123,6 +119,37 @@ def _match_cells_and_nuclei(
     return matched_cells, matched_nuclei, cytoplasm, next_id
 
 
+def _expand_nuclei_to_cells(
+    nuclei: np.ndarray,
+    distance_um: float,
+    scales: dict[str, float],
+) -> np.ndarray:
+    """Expand each nucleus to its nearest-label XY territory within a radius.
+
+    This is the vectorized equivalent of the CellExpansion KD-tree approach.
+    SciPy's exact Euclidean distance transform also handles anisotropic XY
+    pixel sizes without constructing or querying a large coordinate tree.
+    """
+    from scipy.ndimage import distance_transform_edt
+
+    nuclei = np.asarray(nuclei, dtype=np.uint32)
+    cells = np.zeros_like(nuclei)
+    y_scale = float(scales.get("y") or scales.get("x") or 1.0)
+    x_scale = float(scales.get("x") or scales.get("y") or 1.0)
+    for z_index, plane in enumerate(nuclei):
+        if not np.any(plane):
+            continue
+        distances, nearest = distance_transform_edt(
+            plane == 0,
+            sampling=(y_scale, x_scale),
+            return_indices=True,
+        )
+        expanded = plane[nearest[0], nearest[1]]
+        expanded[distances > distance_um] = 0
+        cells[z_index] = expanded
+    return cells
+
+
 def _step_settings(
     settings: SegmentationSettings,
     *,
@@ -138,7 +165,6 @@ def _step_settings(
         primary_channel=primary_channel,
         nuclei_channel=nuclei_channel,
         benchmark=False,
-        multi_step=False,
     )
 
 
@@ -172,34 +198,68 @@ def _segment_multistep_image(
     startup_seconds: float = 0.0,
     zarr_read_seconds: float = 0.0,
 ) -> LabelResult:
-    if not any((settings.cell_step, settings.nucleus_step, settings.spot_step)):
-        raise ValueError("Multi-step mode requires at least one enabled step")
-    spot_channels = (
-        settings.selected_spot_channels(image.data.shape[1])
-        if settings.spot_step
-        else []
-    )
-    spot_spec = spot_target = spot_label = None
-    if settings.spot_step:
-        spot_spec, spot_target, spot_label = _spot_model_dispatch(settings.spot_model)
+    settings.validate_steps()
+    foci_steps = settings.enabled_foci_steps()
+    for slot, _model, channel in foci_steps:
+        if channel < 1 or channel > image.data.shape[1]:
+            raise ValueError(
+                f"Step 3{chr(96 + slot)} channel {channel} is outside input "
+                f"channel count {image.data.shape[1]}"
+            )
     per_time: list[np.ndarray] = []
     infos: list[dict] = []
     channel_labels: list[str] = []
     next_id = 0
     for time_index in range(image.data.shape[0]):
         czyx = image.data[time_index]
-        cell_labels = nucleus_labels = None
+        cell_labels = nucleus_labels = cell_step_nuclei = None
         if settings.cell_step:
-            cell_settings = _step_settings(
-                settings,
-                model=settings.cell_model,
-                target="cells",
-                primary_channel=settings.cell_channel,
-                nuclei_channel=settings.cell_nuclei_channel,
-            )
-            cell_labels, info = segment_czyx(
-                czyx, get_model_spec(settings.cell_model), cell_settings, image.scales
-            )
+            if settings.cell_method == "cell-expansion":
+                expansion_settings = _step_settings(
+                    settings,
+                    model=settings.cell_expansion_nucleus_model,
+                    target="nuclei",
+                    primary_channel=settings.cell_channel,
+                )
+                cell_step_nuclei, info = segment_czyx(
+                    czyx,
+                    get_model_spec(settings.cell_expansion_nucleus_model),
+                    expansion_settings,
+                    image.scales,
+                )
+                cell_labels = _expand_nuclei_to_cells(
+                    cell_step_nuclei,
+                    settings.cell_expansion_distance,
+                    image.scales,
+                )
+            else:
+                cell_settings = _step_settings(
+                    settings,
+                    model=settings.cell_model,
+                    target="cells",
+                    primary_channel=settings.cell_channel,
+                    nuclei_channel=settings.cell_nuclei_channel,
+                )
+                cell_labels, info = segment_czyx(
+                    czyx,
+                    get_model_spec(settings.cell_model),
+                    cell_settings,
+                    image.scales,
+                )
+                if settings.cell_nuclei_channel > 0 and not settings.nucleus_step:
+                    step1_nucleus_settings = _step_settings(
+                        settings,
+                        model=settings.cell_nuclei_model,
+                        target="nuclei",
+                        primary_channel=settings.cell_nuclei_channel,
+                    )
+                    cell_step_nuclei, nucleus_info = segment_czyx(
+                        czyx,
+                        get_model_spec(settings.cell_nuclei_model),
+                        step1_nucleus_settings,
+                        image.scales,
+                    )
+                    infos.append(nucleus_info)
             infos.append(info)
         if settings.nucleus_step:
             nucleus_settings = _step_settings(
@@ -218,18 +278,18 @@ def _segment_multistep_image(
 
         time_channels: list[np.ndarray] = []
         time_channel_labels: list[str] = []
-        if cell_labels is not None and nucleus_labels is not None:
+        matching_nuclei = (
+            nucleus_labels if nucleus_labels is not None else cell_step_nuclei
+        )
+        if cell_labels is not None and matching_nuclei is not None:
             cells, nuclei, cytoplasm, next_id = _match_cells_and_nuclei(
                 cell_labels,
-                nucleus_labels,
+                matching_nuclei,
                 first_id=next_id + 1,
                 remove_border_cells=settings.remove_border_cells,
             )
-            time_channels.extend((cells, nuclei))
-            time_channel_labels.extend(("cells", "nuclei"))
-            if settings.derive_cytoplasm:
-                time_channels.append(cytoplasm)
-                time_channel_labels.append("cytoplasm")
+            time_channels.extend((cells, nuclei, cytoplasm))
+            time_channel_labels.extend(("cells", "nuclei", "cytoplasm"))
         elif cell_labels is not None:
             if settings.remove_border_cells:
                 touching = _border_ids(cell_labels)
@@ -245,12 +305,13 @@ def _segment_multistep_image(
             time_channels.append(nucleus_labels)
             time_channel_labels.append("nuclei")
 
-        for occurrence, channel in enumerate(spot_channels, start=1):
+        for slot, model_id, channel in foci_steps:
+            spot_spec, spot_target, spot_label = _spot_model_dispatch(model_id)
             spot_settings = _step_settings(
                 settings,
-                model=settings.spot_model,
+                model=model_id,
                 target=spot_target,
-                primary_channel=channel + 1,
+                primary_channel=channel,
             )
             if spot_label == "bacteria" and settings.diameter == 0:
                 spot_settings = replace(spot_settings, diameter=-1.0)
@@ -261,7 +322,7 @@ def _segment_multistep_image(
             spots, next_id = _offset_labels(spots, next_id)
             time_channels.append(spots)
             time_channel_labels.append(
-                f"{spot_label} channel {channel + 1} ({occurrence})"
+                f"{spot_label} channel {channel} (3{chr(96 + slot)})"
             )
         if not time_channels:
             raise ValueError("Multi-step mode produced no output channels")
@@ -297,10 +358,16 @@ def _segment_multistep_image(
             "timings": timings,
             "parameters": settings.to_dict(),
             "shared_instance_ids": ["cells", "nuclei", "cytoplasm"]
-            if settings.cell_step and settings.nucleus_step
+            if settings.cell_step
+            and (
+                settings.nucleus_step
+                or settings.cell_method == "cell-expansion"
+                or settings.cell_nuclei_channel > 0
+            )
             else [],
         },
         channel_labels=channel_labels,
+        include_original_channels=settings.include_original_channels,
     )
 def _segment_image(
     image,
@@ -367,6 +434,8 @@ def run_workflow(
 ) -> list[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if not settings.benchmark:
+        settings.validate_steps()
     stores = discover_ome_zarrs(input_dir)
     if not stores:
         raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")
@@ -391,7 +460,7 @@ def run_workflow(
                 f"One or more eligible benchmark models failed; gallery retained at {gallery}"
             )
         return [gallery]
-    model_name = "multistep" if settings.multi_step else _safe_model_name(settings.model)
+    model_name = "multistep"
     for store in stores:
         resources = enumerate_resources(store)
         results = []
@@ -399,9 +468,8 @@ def run_workflow(
             read_started = time.perf_counter()
             image = read_image(resource)
             read_seconds = time.perf_counter() - read_started
-            segmenter = _segment_multistep_image if settings.multi_step else _segment_image
             results.append(
-                segmenter(
+                _segment_multistep_image(
                     image,
                     settings,
                     startup_seconds=startup_remaining,
@@ -414,8 +482,6 @@ def run_workflow(
             output_dir
             / (
                 f"{source_name}_{model_name}.ome.zarr"
-                if settings.multi_step
-                else f"{source_name}_{model_name}_{settings.target}.ome.zarr"
             )
         )
         if resources[0].plate_path is None:

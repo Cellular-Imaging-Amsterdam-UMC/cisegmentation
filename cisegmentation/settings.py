@@ -21,18 +21,30 @@ class SegmentationSettings:
     spotiflow_min_distance: float = 1.0
     benchmark: bool = False
     benchmark_models: str = "all"
-    multi_step: bool = False
     cell_step: bool = True
+    cell_method: str = "deep-learning"
     cell_model: str = "cellpose3:cyto3"
     cell_channel: int = 3
     cell_nuclei_channel: int = 1
-    nucleus_step: bool = True
+    cell_nuclei_model: str = "cellpose3:nuclei"
+    cell_expansion_nucleus_model: str = "cellpose3:nuclei"
+    cell_expansion_distance: float = 10.0
+    nucleus_step: bool = False
     nucleus_model: str = "cellpose3:nuclei"
     nucleus_channel: int = 1
-    spot_step: bool = True
-    spot_model: str = "spotiflow:general"
-    spot_channels: str | list[int] = "2"
-    derive_cytoplasm: bool = True
+    foci_step_1: bool = False
+    foci_model_1: str = "spotiflow:general"
+    foci_channel_1: int = 2
+    foci_step_2: bool = False
+    foci_model_2: str = "spotiflow:general"
+    foci_channel_2: int = 2
+    foci_step_3: bool = False
+    foci_model_3: str = "spotiflow:general"
+    foci_channel_3: int = 2
+    foci_step_4: bool = False
+    foci_model_4: str = "spotiflow:general"
+    foci_channel_4: int = 2
+    include_original_channels: bool = False
     remove_border_cells: bool = False
 
     def to_dict(self) -> dict:
@@ -50,33 +62,24 @@ class SegmentationSettings:
             )
         return channels
 
-    def selected_spot_channels(self, channel_count: int) -> list[int]:
-        """Return the requested one-based spot channels as zero-based indices.
+    def enabled_foci_steps(self) -> list[tuple[int, str, int]]:
+        """Return enabled Step 3 slots as ``(slot, model, one-based channel)``."""
+        return [
+            (slot, getattr(self, f"foci_model_{slot}"), getattr(self, f"foci_channel_{slot}"))
+            for slot in range(1, 5)
+            if getattr(self, f"foci_step_{slot}")
+        ]
 
-        Duplicates are intentionally retained: ``2,2`` produces two independent
-        spot-label output channels.
-        """
-        if isinstance(self.spot_channels, (list, tuple)):
-            values = [str(item).strip() for item in self.spot_channels]
-        else:
-            values = [
-                item.strip()
-                for item in str(self.spot_channels or "")
-                .replace(";", ",")
-                .split(",")
-                if item.strip()
-            ]
-        if not values:
-            raise ValueError("At least one spot channel must be selected")
-        try:
-            channels = [int(value) - 1 for value in values]
-        except ValueError as exc:
-            raise ValueError("Spot channels must be comma-separated channel numbers") from exc
-        if any(index < 0 or index >= channel_count for index in channels):
+    def validate_steps(self) -> None:
+        if not (self.cell_step or self.nucleus_step or self.enabled_foci_steps()):
             raise ValueError(
-                f"Selected one-based spot channels are outside input channel count {channel_count}"
+                "Select at least one segmentation step: Cell Detection, "
+                "Nuclei Detection, or a Foci Detection slot"
             )
-        return channels
+        if self.cell_method not in {"deep-learning", "cell-expansion"}:
+            raise ValueError(f"Unknown cell detection method: {self.cell_method}")
+        if self.cell_expansion_distance < 0:
+            raise ValueError("Cell expansion distance must be zero or greater")
 
 
 def parse_model_selection(value: object) -> list[str]:

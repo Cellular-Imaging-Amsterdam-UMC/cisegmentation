@@ -17,10 +17,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
+# PyTorch declares Triton for torch.compile/Inductor. This inference-only
+# workflow uses eager execution; every supported model family is GPU
+# smoke-tested without Triton, saving about 672 MB unpacked.
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && python -m pip install -r /app/requirements.txt
+    && python -m pip install -r /app/requirements.txt \
+    && python -m pip uninstall -y triton
 COPY tools/download_models.py /app/tools/download_models.py
-COPY bundled_models/stardist/ /opt/cisegmentation/models/stardist/
 COPY --from=model_cache /models/ /opt/cisegmentation/models/
 RUN python /app/tools/download_models.py \
     && rm -rf /root/.cache /tmp/*

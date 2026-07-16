@@ -44,6 +44,7 @@ class LabelResult:
     target: str
     provenance: dict[str, Any] = field(default_factory=dict)
     channel_labels: list[str] | None = None
+    include_original_channels: bool = False
 
 
 def _attrs(group) -> dict[str, Any]:
@@ -215,6 +216,62 @@ def _downsample_labels(data: np.ndarray) -> np.ndarray:
     return data[..., ::2, ::2]
 
 
+def _output_pixels(result: LabelResult) -> tuple[np.ndarray, int]:
+    """Return label-safe int32 output pixels and the original channel count."""
+    labels = np.asarray(result.labels)
+    label_max = int(labels.max(initial=0))
+    if label_max > np.iinfo(np.int32).max:
+        raise OverflowError(
+            f"Maximum label ID {label_max} exceeds QuPath-compatible int32 range"
+        )
+    if not result.include_original_channels:
+        return labels.astype(np.int32, copy=False), 0
+
+    original = np.asarray(result.source.data)
+    if not (
+        np.issubdtype(original.dtype, np.integer)
+        or np.issubdtype(original.dtype, np.floating)
+    ):
+        raise TypeError(
+            "Including original channels supports integer or floating-point "
+            f"source pixels; source dtype is {original.dtype}"
+        )
+    if original.size:
+        if np.issubdtype(original.dtype, np.floating) and not np.all(
+            np.isfinite(original)
+        ):
+            raise ValueError(
+                "Floating-point original channels contain NaN or infinity and "
+                "cannot be converted safely to int32"
+            )
+        range_values = (
+            np.rint(original)
+            if np.issubdtype(original.dtype, np.floating)
+            else original
+        )
+        minimum = float(range_values.min())
+        maximum = float(range_values.max())
+        limits = np.iinfo(np.int32)
+        if minimum < limits.min or maximum > limits.max:
+            raise OverflowError(
+                f"Original pixel range {minimum}..{maximum} does not fit int32"
+            )
+    if original.shape[0] != labels.shape[0] or original.shape[2:] != labels.shape[2:]:
+        raise ValueError("Original and label pixels must have matching T, Z, Y and X")
+    converted = (
+        np.rint(original).astype(np.int32)
+        if np.issubdtype(original.dtype, np.floating)
+        else original.astype(np.int32, copy=False)
+    )
+    return (
+        np.concatenate(
+            (converted, labels.astype(np.int32, copy=False)),
+            axis=1,
+        ),
+        original.shape[1],
+    )
+
+
 def _axis_metadata() -> list[dict[str, str]]:
     return [
         {"name": "t", "type": "time"},
@@ -256,15 +313,69 @@ def _ome_color_int(color: str) -> int:
     return rgba if rgba < 2**31 else rgba - 2**32
 
 
-def _ome_xml(result: LabelResult, name: str) -> str:
-    t, c, z, y, x = result.labels.shape
+def _source_channel_metadata(result: LabelResult, count: int) -> list[dict[str, Any]]:
+    source_channels = (result.source.attrs.get("omero") or {}).get("channels") or []
+    metadata = []
+    for index in range(count):
+        source = source_channels[index] if index < len(source_channels) else {}
+        pixels = np.asarray(result.source.data[:, index])
+        minimum = float(pixels.min(initial=0))
+        maximum = float(pixels.max(initial=0))
+        window = source.get("window") or {}
+        metadata.append(
+            {
+                "label": str(source.get("label") or f"original channel {index + 1}"),
+                "color": str(source.get("color") or _LABEL_COLORS[index % len(_LABEL_COLORS)]),
+                "active": bool(source.get("active", True)),
+                "window": {
+                    "start": float(window.get("start", minimum)),
+                    "end": float(window.get("end", maximum)),
+                    "min": float(window.get("min", minimum)),
+                    "max": float(window.get("max", maximum)),
+                },
+            }
+        )
+    return metadata
+
+
+def _output_channel_metadata(
+    result: LabelResult, pixels: np.ndarray, original_count: int
+) -> list[dict[str, Any]]:
+    channels = _source_channel_metadata(result, original_count)
+    label_names = result.channel_labels or [f"{result.target} labels"]
+    for label_index, channel_name in enumerate(label_names):
+        output_index = original_count + label_index
+        maximum = max(1, int(pixels[:, output_index].max(initial=0)))
+        channels.append(
+            {
+                "label": channel_name,
+                "color": _label_channel_color(channel_name, label_index),
+                "lookupTable": "glasbey_inverted.lut",
+                "active": True,
+                "window": {
+                    "start": 0.0,
+                    "end": float(maximum),
+                    "min": 0.0,
+                    "max": float(maximum),
+                },
+            }
+        )
+    return channels
+
+
+def _ome_xml(
+    result: LabelResult,
+    name: str,
+    pixels: np.ndarray,
+    channels_metadata: list[dict[str, Any]],
+) -> str:
+    t, c, z, y, x = pixels.shape
     px_x, px_y, px_z = (result.source.scales.get(axis, 1.0) for axis in ("x", "y", "z"))
-    channel_names = result.channel_labels or [f"{result.target} labels"]
     channels = "".join(
-        f'<Channel ID="Channel:0:{index}" Name="{channel_name}" '
-        f'Color="{_ome_color_int(_label_channel_color(channel_name, index))}" '
+        f'<Channel ID="Channel:0:{index}" Name="{channel["label"]}" '
+        f'Color="{_ome_color_int(channel["color"])}" '
         'SamplesPerPixel="1"/>'
-        for index, channel_name in enumerate(channel_names)
+        for index, channel in enumerate(channels_metadata)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -278,13 +389,8 @@ def _ome_xml(result: LabelResult, name: str) -> str:
 
 
 def _write_image_group(group, result: LabelResult, name: str) -> None:
-    label_max = int(np.asarray(result.labels).max(initial=0))
-    if label_max > np.iinfo(np.int32).max:
-        raise OverflowError(
-            f"Maximum label ID {label_max} exceeds QuPath-compatible int32 range"
-        )
-    labels = np.asarray(result.labels, dtype=np.int32)
-    levels = [labels]
+    pixels, original_count = _output_pixels(result)
+    levels = [pixels]
     while min(levels[-1].shape[-2:]) >= 512 and len(levels) < 5:
         levels.append(_downsample_labels(levels[-1]))
     datasets = []
@@ -305,29 +411,11 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
     group.attrs["multiscales"] = [
         {"version": "0.4", "name": name, "axes": _axis_metadata(), "datasets": datasets}
     ]
-    channel_names = result.channel_labels or [f"{result.target} labels"]
-    channel_maxima = [
-        max(1, int(labels[:, index].max(initial=0)))
-        for index in range(labels.shape[1])
-    ]
+    channels_metadata = _output_channel_metadata(result, pixels, original_count)
     group.attrs["omero"] = {
         "version": "0.4",
         "name": name,
-        "channels": [
-            {
-                "label": channel_name,
-                "color": _label_channel_color(channel_name, index),
-                "lookupTable": "glasbey_inverted.lut",
-                "active": True,
-                "window": {
-                    "start": 0.0,
-                    "end": float(channel_maxima[index]),
-                    "min": 0.0,
-                    "max": float(channel_maxima[index]),
-                },
-            }
-            for index, channel_name in enumerate(channel_names)
-        ],
+        "channels": channels_metadata,
         "rdefs": {"defaultT": 0, "defaultZ": 0, "model": "color"},
     }
     group.attrs["cisegmentation"] = {
@@ -335,6 +423,14 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
         "target": result.target,
         "source": str(result.source.resource.store_path.name),
         "storage_dtype": "int32",
+        "original_channel_count": original_count,
+        "original_source_dtype": result.source.source_dtype
+        if original_count
+        else None,
+        "original_channels_conversion": "round-to-nearest-int32"
+        if original_count
+        and np.issubdtype(np.dtype(result.source.source_dtype), np.floating)
+        else ("lossless-int32-cast" if original_count else None),
         "label_rendering": {
             "lookup_table": "glasbey_inverted.lut",
             "rendering_only": True,
@@ -352,7 +448,9 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
     ome = Path(store_root) / group.path / "OME"
     ome.mkdir(parents=True, exist_ok=True)
     (ome / ".zgroup").write_text(json.dumps({"zarr_format": 2}), encoding="utf-8")
-    (ome / "METADATA.ome.xml").write_text(_ome_xml(result, name), encoding="utf-8")
+    (ome / "METADATA.ome.xml").write_text(
+        _ome_xml(result, name, pixels, channels_metadata), encoding="utf-8"
+    )
 
 
 def write_label_image(result: LabelResult, output_path: str | Path) -> Path:

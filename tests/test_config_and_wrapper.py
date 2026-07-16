@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from bilayers_cli import load_config, validate_config
+from bilayers_cli import generate_cli_command, load_config, validate_config
 from wrapper import build_parser
 
 
@@ -13,10 +13,13 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["diameter"]["mode"] == "advanced"
     assert parameters["diameter"]["minimum"] == -1.0
     assert parameters["spotiflow_min_distance"]["type"] == "float"
-    assert parameters["multi_step"]["type"] == "checkbox"
-    assert parameters["spot_channels"]["default"] == "2"
+    assert "multi_step" not in parameters
+    assert parameters["cell_step"]["default"] is True
+    assert parameters["nucleus_step"]["default"] is False
+    assert all(parameters[f"foci_step_{slot}"]["default"] is False for slot in range(1, 5))
+    assert parameters["include_original_channels"]["default"] is False
     assert parameters["remove_border_cells"]["default"] is False
-    spot_models = {option["value"] for option in parameters["spot_model"]["options"]}
+    spot_models = {option["value"] for option in parameters["foci_model_1"]["options"]}
     assert {
         "stardist:SD_Foci_Aggregates",
         "stardist:SD_Foci_Finn",
@@ -63,6 +66,14 @@ def test_wrapper_accepts_hyphenated_bilayers_parameters():
     assert args.model == "stardist:SD_Foci_Finn"
     assert args.primary_channel == 2
     assert args.benchmark is True
+
+
+def test_bilayers_can_disable_default_cell_step():
+    command = generate_cli_command(
+        load_config(), {"cell_step": False, "nucleus_step": True}
+    )
+    assert "--cell-step False" in command
+    assert "--nucleus-step True" in command
 
 
 def test_environment_bootstrap_installs_launcher_dependencies():

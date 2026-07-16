@@ -24,15 +24,20 @@ def test_channel_selection_is_one_based_and_validated():
         SegmentationSettings(primary_channel=4).selected_channels(3)
 
 
-def test_repeated_spot_channels_are_retained_and_validated():
-    settings = SegmentationSettings(spot_channels="2, 2;3")
-    assert settings.selected_spot_channels(3) == [1, 1, 2]
-    assert SegmentationSettings(spot_channels=[2, 2]).selected_spot_channels(3) == [
-        1,
-        1,
+def test_four_independent_foci_slots_retain_duplicate_channels():
+    settings = SegmentationSettings(
+        foci_step_1=True,
+        foci_channel_1=2,
+        foci_step_2=True,
+        foci_channel_2=2,
+        foci_step_4=True,
+        foci_channel_4=3,
+    )
+    assert settings.enabled_foci_steps() == [
+        (1, "spotiflow:general", 2),
+        (2, "spotiflow:general", 2),
+        (4, "spotiflow:general", 3),
     ]
-    with pytest.raises(ValueError, match="outside input channel count"):
-        SegmentationSettings(spot_channels="4").selected_spot_channels(3)
 
 
 @pytest.mark.parametrize(

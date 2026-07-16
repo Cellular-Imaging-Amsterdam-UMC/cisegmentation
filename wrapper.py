@@ -96,8 +96,7 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(args, name):
             values[name] = getattr(args, name)
     settings = SegmentationSettings(**values)
-    mode = "multi-step" if settings.multi_step else f"model={settings.model}, target={settings.target}"
-    print(f"CI segmentation: {mode}, benchmark={settings.benchmark}")
+    print(f"CI segmentation: optional steps, benchmark={settings.benchmark}")
     try:
         outputs = run_workflow(
             args.input_dir,

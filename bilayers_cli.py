@@ -54,7 +54,14 @@ def generate_cli_command(
     for item in sorted(items, key=lambda value: int(value.get("cli_order", 0))):
         tag = item.get("cli_tag")
         value = values.get(item.get("name"), item.get("value", item.get("default")))
-        if not tag or value in (None, "", False):
+        passes_boolean_value = item.get("type") == "checkbox" and item.get(
+            "append_value", False
+        )
+        if (
+            not tag
+            or value in (None, "")
+            or (value is False and not passes_boolean_value)
+        ):
             continue
         append = item.get("append_value", item.get("type") != "checkbox")
         command.append(str(tag))

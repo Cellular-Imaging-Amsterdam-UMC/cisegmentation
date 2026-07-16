@@ -17,11 +17,15 @@ if not defined MODEL_CACHE_ID (
 )
 docker image inspect w_cisegmentation-model-cache:%MODEL_CACHE_ID% >nul 2>&1
 if errorlevel 1 (
+  echo Cleaned host model cache is ready. Building Docker model-cache image %MODEL_CACHE_ID%...
+  echo The one-time build context is approximately 3 GiB and can take a while to transfer.
   docker build -f Dockerfile.models --build-arg MODEL_CACHE_ID=%MODEL_CACHE_ID% -t w_cisegmentation-model-cache:%MODEL_CACHE_ID% -t w_cisegmentation-model-cache:latest .
   if errorlevel 1 (
     popd
     endlocal & exit /b 1
   )
+) else (
+  echo Reusing validated Docker model-cache image %MODEL_CACHE_ID%.
 )
 docker build %* --build-arg MODEL_CACHE_IMAGE=w_cisegmentation-model-cache:%MODEL_CACHE_ID% -t w_cisegmentation:%VERSION% -t w_cisegmentation:latest .
 set "EXITCODE=%ERRORLEVEL%"

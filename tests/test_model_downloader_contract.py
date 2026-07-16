@@ -1,6 +1,7 @@
 import json
 
 from tools.download_models import (
+    CACHE_SCHEMA,
     CUSTOM_COMMIT,
     CUSTOM_STARDIST,
     INSTANSEG_MODELS,
@@ -33,7 +34,7 @@ def test_complete_cache_inventory_detects_missing_artifacts(tmp_path):
     artifact.parent.mkdir()
     artifact.write_bytes(b"checkpoint")
     state = {
-        "schema": 2,
+        "schema": CACHE_SCHEMA,
         "custom_stardist_commit": CUSTOM_COMMIT,
         "inventory": _cache_inventory(tmp_path),
     }

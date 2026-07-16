@@ -13,6 +13,7 @@ import urllib.request
 import zipfile
 
 
+CACHE_SCHEMA = 3
 CP3_MODELS = (
     "cyto3",
     "nuclei",
@@ -87,7 +88,10 @@ def _complete_cache_state(root: Path) -> dict | None:
         state = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if state.get("schema") != 2 or state.get("custom_stardist_commit") != CUSTOM_COMMIT:
+    if (
+        state.get("schema") != CACHE_SCHEMA
+        or state.get("custom_stardist_commit") != CUSTOM_COMMIT
+    ):
         return None
     inventory = state.get("inventory")
     if not isinstance(inventory, dict) or inventory != _cache_inventory(root):
@@ -245,8 +249,12 @@ def _download_stardist(root: Path) -> dict:
             convert_model_folder(folder, output_name=checkpoint.name)
         StarDist2D.from_folder(folder, device="cpu")
         state[name] = _sha256(checkpoint)
+        # The Keras H5 file is only a conversion source. Keep the validated PT
+        # checkpoint used by inference and omit the duplicate source weights.
+        (folder / "weights_best.h5").unlink(missing_ok=True)
     StarDist2D.from_folder(versatile, device="cpu")
     state["SD_Nuclei_Versatile"] = _sha256(versatile / "SD_Nuclei_Versatile.pt")
+    (versatile / "weights_best.h5").unlink(missing_ok=True)
     return state
 
 
@@ -255,12 +263,45 @@ def _download_spotiflow(root: Path) -> dict:
     destination.mkdir(parents=True, exist_ok=True)
     os.environ["SPOTIFLOW_CACHE_DIR"] = str(destination)
     os.environ["SPOTIFLOW_LOCAL_MODELS_PATH"] = str(destination)
+    from spotiflow.model import Spotiflow
     from spotiflow.model.pretrained import get_pretrained_model_path
 
-    return {
-        name: str(get_pretrained_model_path(name, cache_dir=destination))
-        for name in SPOTIFLOW_MODELS
-    }
+    state = {}
+    for name in SPOTIFLOW_MODELS:
+        folder = destination / name
+        required = (folder / "best.pt", folder / "config.yaml")
+        if not all(path.is_file() and path.stat().st_size > 0 for path in required):
+            get_pretrained_model_path(name, cache_dir=destination)
+        try:
+            model = Spotiflow.from_folder(
+                folder,
+                inference_mode=True,
+                which="best",
+                map_location="cpu",
+            )
+        except Exception:
+            # Recover an interrupted or invalid extracted model once from the
+            # registered download rather than accepting a partial directory.
+            if folder.exists():
+                shutil.rmtree(folder)
+            (destination / f"{name}.zip").unlink(missing_ok=True)
+            get_pretrained_model_path(name, cache_dir=destination)
+            model = Spotiflow.from_folder(
+                folder,
+                inference_mode=True,
+                which="best",
+                map_location="cpu",
+            )
+        del model
+        state[name] = _sha256(folder / "best.pt")
+        # Runtime loads best.pt directly from the extracted folder. The
+        # archive and training-resume checkpoint are not needed afterwards.
+        (folder / "last.pt").unlink(missing_ok=True)
+        (destination / f"{name}.zip").unlink(missing_ok=True)
+    macos_metadata = destination / "__MACOSX"
+    if macos_metadata.exists():
+        shutil.rmtree(macos_metadata)
+    return state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,9 +323,9 @@ def main(argv: list[str] | None = None) -> int:
     args.models_dir.mkdir(parents=True, exist_ok=True)
     if not args.skip_cellpose and not args.skip_spotiflow:
         if _complete_cache_state(args.models_dir) is not None:
-            print(f"Model cache already complete: {args.models_dir}")
+            print(f"Host model cache already complete and validated: {args.models_dir}")
             return 0
-    state = {"schema": 2, "custom_stardist_commit": CUSTOM_COMMIT}
+    state = {"schema": CACHE_SCHEMA, "custom_stardist_commit": CUSTOM_COMMIT}
     if not args.skip_cellpose:
         state["cellpose"] = _download_cellpose(args.models_dir)
     state["stardist"] = _download_stardist(args.models_dir)

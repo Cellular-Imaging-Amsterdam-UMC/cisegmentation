@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -527,45 +528,89 @@ class Window(QMainWindow):
         )
 
     def _update_parameter_state(self) -> None:
-        multi = bool(
-            isinstance(self.widgets.get("multi_step"), QCheckBox)
-            and self.widgets["multi_step"].isChecked()
-        )
-        for name in ("model", "target", "primary_channel", "nuclei_channel"):
-            if name in self.widgets:
-                self.widgets[name].setEnabled(not multi)
         groups = {
-            "cell_step": ("cell_model", "cell_channel", "cell_nuclei_channel"),
             "nucleus_step": ("nucleus_model", "nucleus_channel"),
-            "spot_step": ("spot_model", "spot_channels"),
+            "foci_step_1": ("foci_model_1", "foci_channel_1"),
+            "foci_step_2": ("foci_model_2", "foci_channel_2"),
+            "foci_step_3": ("foci_model_3", "foci_channel_3"),
+            "foci_step_4": ("foci_model_4", "foci_channel_4"),
         }
         for toggle_name, dependent_names in groups.items():
             toggle = self.widgets.get(toggle_name)
-            if toggle is not None:
-                toggle.setEnabled(multi)
-            enabled = multi and isinstance(toggle, QCheckBox) and toggle.isChecked()
+            enabled = isinstance(toggle, QCheckBox) and toggle.isChecked()
             for name in dependent_names:
                 if name in self.widgets:
                     self.widgets[name].setEnabled(enabled)
-        for name in ("derive_cytoplasm", "remove_border_cells"):
+
+        cell_toggle = self.widgets.get("cell_step")
+        cell_enabled = isinstance(cell_toggle, QCheckBox) and cell_toggle.isChecked()
+        method = self.widgets.get("cell_method")
+        expansion = (
+            cell_enabled
+            and isinstance(method, QComboBox)
+            and method.currentData() == "cell-expansion"
+        )
+        for name in ("cell_method", "cell_channel"):
             if name in self.widgets:
-                self.widgets[name].setEnabled(multi)
+                self.widgets[name].setEnabled(cell_enabled)
+        for name in ("cell_model", "cell_nuclei_channel"):
+            if name in self.widgets:
+                self.widgets[name].setEnabled(cell_enabled and not expansion)
+        nuclei_channel = self.widgets.get("cell_nuclei_channel")
+        if "cell_nuclei_model" in self.widgets:
+            self.widgets["cell_nuclei_model"].setEnabled(
+                cell_enabled
+                and not expansion
+                and isinstance(nuclei_channel, QSpinBox)
+                and nuclei_channel.value() > 0
+            )
+        for name in ("cell_expansion_nucleus_model", "cell_expansion_distance"):
+            if name in self.widgets:
+                self.widgets[name].setEnabled(expansion)
 
     def run_docker(self) -> None:
+        if not self._validate_run_selection():
+            return
         self.save()
         subprocess.Popen(self.docker_command(), cwd=ROOT)
 
     def run_local(self) -> None:
+        if not self._validate_run_selection():
+            return
         self.save()
         subprocess.Popen(self.local_command(), cwd=ROOT)
 
     def run_roundtrip(self) -> None:
+        if not self._validate_run_selection():
+            return
         self.save()
         for button in self.run_buttons:
             button.setEnabled(False)
         self.roundtrip_dialog = RoundtripDialog(self.roundtrip_command(), self)
         self.roundtrip_dialog.roundtripFinished.connect(self._roundtrip_finished)
         self.roundtrip_dialog.show()
+
+    def _validate_run_selection(self) -> bool:
+        values = self.values()
+        if values.get("benchmark") or any(
+            values.get(name)
+            for name in (
+                "cell_step",
+                "nucleus_step",
+                "foci_step_1",
+                "foci_step_2",
+                "foci_step_3",
+                "foci_step_4",
+            )
+        ):
+            return True
+        QMessageBox.warning(
+            self,
+            "No segmentation step selected",
+            "Select Cell Detection, Nuclei Detection, or at least one Foci "
+            "Detection slot before running.",
+        )
+        return False
 
     def _roundtrip_finished(self, _result: int) -> None:
         for button in self.run_buttons:
