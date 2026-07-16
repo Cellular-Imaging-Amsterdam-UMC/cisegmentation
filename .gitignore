@@ -19,3 +19,5 @@ dist/
 build/
 *.egg-info/
 tools/omero_import_metadata_probe/reports/
+pushdocker.cmd
+release_github.cmd

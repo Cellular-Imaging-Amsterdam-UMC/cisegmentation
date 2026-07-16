@@ -7,6 +7,7 @@ import sys
 import pytest
 
 from cisegmentation.roundtrip import (
+    BiomeroWorkflowLogCompactor,
     RoundtripRunner,
     descriptor_url,
     docker_build_state_matches,
@@ -128,6 +129,49 @@ def test_command_output_can_be_logged_without_echoing_to_ui(tmp_path):
     assert "diagnostic output" in (runner.log_dir / "diagnostic.log").read_text(
         encoding="utf-8"
     )
+
+
+def test_biomero_log_compactor_deduplicates_overlapping_job_tails():
+    compact = BiomeroWorkflowLogCompactor()
+    lines = [
+        '* Running commands: tail -n 10 "omero-62.log" | strings\n',
+        "\t* Running bilayers workflow...\n",
+        "\t* CI segmentation: optional steps, benchmark=False\n",
+        "\t* 2026-07-16 INFO [ biomero.slurm_client] [1] (MainThread) Running bilayers workflow...\n",
+        "\t* Issue with extracting progress: list index out of range\n",
+        '* Running commands: tail -n 10 "omero-62.log" | strings\n',
+        "\t* Running bilayers workflow...\n",
+        "\t* CI segmentation: optional steps, benchmark=False\n",
+        "\t* Output: /data/out/result.ome.zarr\n",
+        "\t* Timing: result.ome.zarr | total=12.0s\n",
+        "\t* CI segmentation completed in 12.0 seconds.\n",
+        "\t* Issue with extracting progress: list index out of range\n",
+    ]
+    output = "".join(value for line in lines if (value := compact(line)))
+    assert output.count("Running bilayers workflow") == 1
+    assert output.count("CI segmentation: optional steps") == 1
+    assert output.count("Timing: result.ome.zarr") == 1
+    assert "Issue with extracting progress" not in output
+
+
+def test_command_filter_keeps_raw_log_and_compacts_visible_log(tmp_path):
+    emitted: list[str] = []
+    runner = RoundtripRunner(
+        Path.cwd(), tmp_path, tmp_path, {}, biomero_root=tmp_path, emit=emitted.append
+    )
+    result = runner.run_cmd(
+        [sys.executable, "-c", "print('keep'); print('hide')"],
+        "compact.log",
+        timeout=5,
+        output_filter=lambda line: None if "hide" in line else line,
+        raw_log_name="raw.log",
+    )
+    assert result.stdout == "keep\nhide\n"
+    compact_log = (runner.log_dir / "compact.log").read_text(encoding="utf-8")
+    raw_log = (runner.log_dir / "raw.log").read_text(encoding="utf-8")
+    assert "\nkeep\n" in compact_log
+    assert "\nhide\n" not in compact_log
+    assert "\nhide\n" in raw_log
 
 
 def test_redaction_and_roundtrip_serialization():

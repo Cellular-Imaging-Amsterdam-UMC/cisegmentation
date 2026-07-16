@@ -183,3 +183,5 @@ terminates the local process tree and cancels the active cisegmentation Slurm
 job; temporary OMERO objects and Slurm evidence are retained. A fully
 successful roundtrip exports results, collects correlated logs under
 `outputfolder/logs/<roundtrip-id>/`, and deletes its temporary OMERO objects.
+`biomero_workflow.log` is compacted for normal inspection, while
+`biomero_workflow.raw.log` retains the complete unfiltered BIOMERO output.

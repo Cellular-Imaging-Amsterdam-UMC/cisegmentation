@@ -27,6 +27,50 @@ DEFAULT_SLURM = "slurmctld"
 DOCKER_BUILD_STATE = ".docker-build-state.json"
 
 
+class BiomeroWorkflowLogCompactor:
+    """Deduplicate the overlapping Slurm log tails emitted by BIOMERO polling."""
+
+    _logged_message = re.compile(
+        r"^\d{4}-\d{2}-\d{2} .*?\[[^]]+\] \[\d+\] \(MainThread\)\s*(.*)$"
+    )
+
+    def __init__(self) -> None:
+        self._inside_tail = False
+        self._seen_tail_lines: set[str] = set()
+
+    @classmethod
+    def _payload(cls, line: str) -> str:
+        prefix_free = re.sub(r"^\s*\*\s?", "", line.rstrip("\r\n"))
+        logged = cls._logged_message.match(prefix_free)
+        return logged.group(1) if logged else prefix_free
+
+    def __call__(self, line: str) -> str | None:
+        if "tail -n 10" in line and re.search(r'omero-(?:%j|\d+)\.log', line):
+            self._inside_tail = True
+            return None
+        if not self._inside_tail:
+            return line
+        if "Issue with extracting progress:" in line:
+            self._inside_tail = False
+            return None
+        if any(
+            marker in line
+            for marker in (
+                "Getting status of [",
+                "Retrieving a list of completed jobs",
+                "Running import script",
+            )
+        ):
+            self._inside_tail = False
+            return line
+
+        payload = self._payload(line).strip()
+        if not payload or payload in self._seen_tail_lines:
+            return None
+        self._seen_tail_lines.add(payload)
+        return f"\t* {payload}\n"
+
+
 def docker_source_id(root: str | Path) -> str:
     root = Path(root).resolve()
     marker = root / "models" / ".complete.json"
@@ -326,6 +370,8 @@ class RoundtripRunner:
         heartbeat: str | None = None,
         on_line: Callable[[str], None] | None = None,
         echo_output: bool = True,
+        output_filter: Callable[[str], str | None] | None = None,
+        raw_log_name: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         self.log_dir.mkdir(parents=True, exist_ok=True)
         safe = redact(subprocess.list2cmdline(command), [self.password])
@@ -360,39 +406,60 @@ class RoundtripRunner:
         command_started = time.monotonic()
         deadline = command_started + timeout if timeout else None
         log_path = self.log_dir / log_name
-        with log_path.open("w", encoding="utf-8") as log_file:
-            log_file.write(f"$ {safe}\n\n")
-            finished = False
-            last_heartbeat = time.monotonic()
-            while not finished:
-                if deadline is not None and time.monotonic() > deadline:
-                    proc.kill()
-                    raise subprocess.TimeoutExpired(command, timeout)
-                try:
-                    line = pending.get(timeout=0.2)
-                except queue.Empty:
-                    if heartbeat and time.monotonic() - last_heartbeat >= 30:
-                        elapsed = int(time.monotonic() - command_started)
-                        status = f"{heartbeat} ({elapsed}s elapsed)"
-                        log_file.write(f"# {status}\n")
+        raw_log_file = (
+            (self.log_dir / raw_log_name).open("w", encoding="utf-8")
+            if raw_log_name
+            else None
+        )
+        try:
+            with log_path.open("w", encoding="utf-8") as log_file:
+                if raw_log_file:
+                    raw_log_file.write(f"$ {safe}\n\n")
+                log_file.write(f"$ {safe}\n\n")
+                finished = False
+                last_heartbeat = time.monotonic()
+                while not finished:
+                    if deadline is not None and time.monotonic() > deadline:
+                        proc.kill()
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        line = pending.get(timeout=0.2)
+                    except queue.Empty:
+                        if heartbeat and time.monotonic() - last_heartbeat >= 30:
+                            elapsed = int(time.monotonic() - command_started)
+                            status = f"{heartbeat} ({elapsed}s elapsed)"
+                            log_file.write(f"# {status}\n")
+                            log_file.flush()
+                            if raw_log_file:
+                                raw_log_file.write(f"# {status}\n")
+                                raw_log_file.flush()
+                            if echo_output:
+                                self._emit(status)
+                            last_heartbeat = time.monotonic()
+                        if proc.poll() is not None and pending.empty():
+                            break
+                        continue
+                    if line is None:
+                        finished = True
+                        continue
+                    safe_line = redact(line, [self.password])
+                    lines.append(safe_line)
+                    if raw_log_file:
+                        raw_log_file.write(safe_line)
+                        raw_log_file.flush()
+                    visible_line = (
+                        output_filter(safe_line) if output_filter else safe_line
+                    )
+                    if visible_line is not None:
+                        log_file.write(visible_line)
                         log_file.flush()
                         if echo_output:
-                            self._emit(status)
-                        last_heartbeat = time.monotonic()
-                    if proc.poll() is not None and pending.empty():
-                        break
-                    continue
-                if line is None:
-                    finished = True
-                    continue
-                safe_line = redact(line, [self.password])
-                lines.append(safe_line)
-                log_file.write(safe_line)
-                log_file.flush()
-                if echo_output:
-                    self._emit(safe_line.rstrip("\r\n"))
-                if on_line:
-                    on_line(safe_line)
+                            self._emit(visible_line.rstrip("\r\n"))
+                    if on_line:
+                        on_line(safe_line)
+        finally:
+            if raw_log_file:
+                raw_log_file.close()
         return_code = proc.wait()
         output = "".join(lines)
         if return_code:
@@ -737,6 +804,8 @@ o={model}(); o.setName(rstring(os.environ['OBJECT_NAME'])); o=c.getUpdateService
             timeout=self.timeout,
             heartbeat="Waiting for BIOMERO analysis and OMERO result import…",
             on_line=capture_identifiers,
+            output_filter=BiomeroWorkflowLogCompactor(),
+            raw_log_name="biomero_workflow.raw.log",
         )
         output = (proc.stdout or "") + (proc.stderr or "")
         capture_identifiers(output)
