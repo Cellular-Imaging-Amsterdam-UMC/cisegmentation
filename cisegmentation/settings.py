@@ -4,6 +4,35 @@ from dataclasses import asdict, dataclass
 import json
 
 
+CELL_MODELS = (
+    "cellpose3:cyto3",
+    "cellpose-sam:cpsam",
+    "instanseg:fluorescence_nuclei_and_cells",
+)
+STEP1_NUCLEUS_MODELS = (
+    "cellpose3:nuclei",
+    "cellpose-sam:cpsam",
+    "stardist:SD_Nuclei_Versatile",
+    "instanseg:single_channel_nuclei",
+)
+STEP2_NUCLEUS_MODELS = (
+    *STEP1_NUCLEUS_MODELS,
+    "instanseg:fluorescence_nuclei_and_cells",
+)
+FOCI_MODELS = (
+    "spotiflow:general",
+    "spotiflow:hybiss",
+    "spotiflow:synth_complex",
+    "spotiflow:synth_3d",
+    "spotiflow:smfish_3d",
+    "spotiflow:fluo_live",
+    "stardist:SD_Foci_Aggregates",
+    "stardist:SD_Foci_Finn",
+    "cellpose3:bact_phase_cp3",
+    "cellpose3:bact_fluor_cp3",
+)
+
+
 @dataclass
 class SegmentationSettings:
     model: str = "cellpose3:nuclei"
@@ -20,7 +49,6 @@ class SegmentationSettings:
     spotiflow_prob_threshold: float = -1.0
     spotiflow_min_distance: float = 1.0
     benchmark: bool = False
-    benchmark_models: str = "all"
     cell_step: bool = True
     cell_method: str = "deep-learning"
     cell_model: str = "cellpose3:cyto3"
@@ -45,7 +73,7 @@ class SegmentationSettings:
     foci_model_4: str = "spotiflow:general"
     foci_channel_4: int = 2
     include_original_channels: bool = False
-    remove_border_cells: bool = False
+    remove_border_cells: bool = True
 
     def to_dict(self) -> dict:
         return asdict(self)

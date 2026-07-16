@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
+import math
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,24 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .adapters import segment_czyx
 from .ome_zarr_io import ImageData, write_rgb_gallery
-from .registry import (
-    MODEL_REGISTRY,
-    ModelSpec,
-    get_model_spec,
+from .registry import ModelSpec, get_model_spec
+from .settings import (
+    CELL_MODELS,
+    FOCI_MODELS,
+    STEP1_NUCLEUS_MODELS,
+    STEP2_NUCLEUS_MODELS,
+    SegmentationSettings,
 )
-from .settings import SegmentationSettings, parse_model_selection
+
+
+@dataclass(frozen=True)
+class BenchmarkCase:
+    key: str
+    step: str
+    spec: ModelSpec
+    target: str
+    primary_channel: int
+    nuclei_channel: int = 0
 
 
 def center_crop(
@@ -31,38 +44,82 @@ def center_crop(
     }
 
 
-def _benchmark_specs(
-    settings: SegmentationSettings, channel_count: int
-) -> list[ModelSpec]:
-    selected = parse_model_selection(settings.benchmark_models)
-    preset = selected[0] if len(selected) == 1 else ""
-    if not selected:
-        preset = "all"
-    families = {
-        "all": None,
-        "cellpose": {"cellpose-sam"},
-        "cellpose3": {"cellpose3"},
-        "stardist": {"stardist"},
-        "instanseg": {"instanseg"},
-        "spotiflow": {"spotiflow"},
-    }
-    if preset in families:
-        selected_families = families[preset]
-        return [
-            spec
-            for spec in MODEL_REGISTRY.values()
-            if selected_families is None or spec.family in selected_families
-        ]
-    return [get_model_spec(model_id) for model_id in selected]
+def _foci_target(spec: ModelSpec) -> str:
+    if spec.family == "spotiflow":
+        return "spots"
+    if spec.family == "stardist":
+        return "foci"
+    return "cells"  # Cellpose 3 bacterial instance masks
 
 
-def _is_preset(settings: SegmentationSettings) -> bool:
-    selected = parse_model_selection(settings.benchmark_models)
-    return not selected or (
-        len(selected) == 1
-        and selected[0]
-        in {"all", "cellpose", "cellpose3", "stardist", "instanseg", "spotiflow"}
-    )
+def _benchmark_cases(settings: SegmentationSettings) -> list[BenchmarkCase]:
+    """Expand every enabled workflow step into all models offered by its UI."""
+    cases: list[BenchmarkCase] = []
+
+    def add(
+        step: str,
+        model_ids: tuple[str, ...],
+        target: str,
+        primary_channel: int,
+        nuclei_channel: int = 0,
+    ) -> None:
+        for model_id in model_ids:
+            spec = get_model_spec(model_id)
+            cases.append(
+                BenchmarkCase(
+                    key=f"{step}|ch{primary_channel}|{model_id}",
+                    step=step,
+                    spec=spec,
+                    target=target,
+                    primary_channel=primary_channel,
+                    nuclei_channel=nuclei_channel,
+                )
+            )
+
+    if settings.cell_step:
+        if settings.cell_method == "cell-expansion":
+            add(
+                "Step 1 expansion nuclei",
+                STEP1_NUCLEUS_MODELS,
+                "nuclei",
+                settings.cell_channel,
+            )
+        else:
+            add(
+                "Step 1 cells",
+                CELL_MODELS,
+                "cells",
+                settings.cell_channel,
+                settings.cell_nuclei_channel,
+            )
+            if settings.cell_nuclei_channel > 0 and not settings.nucleus_step:
+                add(
+                    "Step 1 nuclei",
+                    STEP1_NUCLEUS_MODELS,
+                    "nuclei",
+                    settings.cell_nuclei_channel,
+                )
+    if settings.nucleus_step:
+        add(
+            "Step 2 nuclei",
+            STEP2_NUCLEUS_MODELS,
+            "nuclei",
+            settings.nucleus_channel,
+        )
+    for slot, _selected_model, channel in settings.enabled_foci_steps():
+        step = f"Step 3{chr(96 + slot)} foci"
+        for model_id in FOCI_MODELS:
+            spec = get_model_spec(model_id)
+            cases.append(
+                BenchmarkCase(
+                    key=f"{step}|ch{channel}|{model_id}",
+                    step=step,
+                    spec=spec,
+                    target=_foci_target(spec),
+                    primary_channel=channel,
+                )
+            )
+    return cases
 
 
 def _normalize(image: np.ndarray) -> np.ndarray:
@@ -111,56 +168,72 @@ def _label_overlay(
 
 
 def _gallery(
-    raw: np.ndarray,
-    specs: list[ModelSpec],
+    cases: list[BenchmarkCase],
+    raw_by_case: dict[str, np.ndarray],
     runs: list[dict[str, Any]],
-    labels_by_model: dict[str, np.ndarray],
+    labels_by_case: dict[str, np.ndarray],
 ) -> np.ndarray:
     panel_w = 280
-    image_h = max(140, int(round(panel_w * raw.shape[-2] / raw.shape[-1])))
+    sample_raw = raw_by_case[cases[0].key]
+    image_h = max(
+        140, int(round(panel_w * sample_raw.shape[-2] / sample_raw.shape[-1]))
+    )
     header_h, title_h, gap = 38, 42, 12
     panel_h = header_h + image_h
-    width = len(specs) * panel_w + (len(specs) + 1) * gap
-    height = title_h + 2 * panel_h + 3 * gap
+    columns = min(4, len(cases))
+    rows = math.ceil(len(cases) / columns)
+    block_h = 2 * panel_h + gap
+    width = columns * panel_w + (columns + 1) * gap
+    height = title_h + rows * block_h + (rows + 1) * gap
     montage = Image.new("RGB", (max(width, 320), height), "white")
     draw = ImageDraw.Draw(montage)
     font = ImageFont.load_default()
     draw.text((gap, 14), "CI Segmentation benchmark", fill="black", font=font)
-    input_panel = _fit_panel(
-        Image.fromarray(np.repeat(_normalize(raw)[..., None], 3, axis=-1), "RGB"),
-        panel_w,
-        image_h,
-    )
-    runs_by_model = {run["model"]: run for run in runs}
-    for index, spec in enumerate(specs):
-        x = gap + index * (panel_w + gap)
-        for row in range(2):
-            y = title_h + gap + row * (panel_h + gap)
+    runs_by_case = {run["case"]: run for run in runs}
+    for index, case in enumerate(cases):
+        column = index % columns
+        block_row = index // columns
+        x = gap + column * (panel_w + gap)
+        block_y = title_h + gap + block_row * (block_h + gap)
+        raw = raw_by_case[case.key]
+        input_panel = _fit_panel(
+            Image.fromarray(
+                np.repeat(_normalize(raw)[..., None], 3, axis=-1), "RGB"
+            ),
+            panel_w,
+            image_h,
+        )
+        for panel_row in range(2):
+            y = block_y + panel_row * (panel_h + gap)
             draw.rectangle(
                 (x, y, x + panel_w - 1, y + panel_h - 1),
                 fill=(245, 245, 245),
                 outline=(170, 170, 170),
             )
         draw.text(
-            (x + 8, title_h + gap + 13), f"Input | {spec.id}", fill="black", font=font
+            (x + 8, block_y + 7),
+            f"{case.step} | C{case.primary_channel}",
+            fill="black",
+            font=font,
         )
-        montage.paste(input_panel, (x, title_h + gap + header_h))
-        run = runs_by_model[spec.id]
-        output_y = title_h + gap + panel_h + gap
+        draw.text((x + 8, block_y + 21), case.spec.id, fill="black", font=font)
+        montage.paste(input_panel, (x, block_y + header_h))
+        run = runs_by_case[case.key]
+        output_y = block_y + panel_h + gap
         status = run["status"]
         suffix = ""
         if status == "success":
             suffix = f" | n={run.get('object_count', 0)} | {run.get('runtime_seconds', 0):.1f}s"
         draw.text(
             (x + 8, output_y + 13),
-            f"{status}: {spec.id}{suffix}",
+            f"{status}: {case.spec.id}{suffix}",
             fill="black",
             font=font,
         )
-        labels = labels_by_model.get(spec.id)
+        labels = labels_by_case.get(case.key)
         if labels is not None:
             overlay = _label_overlay(
-                raw, labels, panel_w, image_h, spec.family == "spotiflow"
+                raw, labels, panel_w, image_h, case.target == "spots"
             )
             montage.paste(overlay, (x, output_y + header_h))
         else:
@@ -182,48 +255,62 @@ def run_benchmark(
     *,
     base_timings: dict[str, float] | None = None,
 ) -> tuple[Path, bool]:
+    settings.validate_steps()
     first_t, crop = center_crop(image.data[0])
-    specs = _benchmark_specs(settings, first_t.shape[0])
+    cases = _benchmark_cases(settings)
     runs: list[dict[str, Any]] = []
-    labels_by_model: dict[str, np.ndarray] = {}
+    labels_by_case: dict[str, np.ndarray] = {}
+    raw_by_case: dict[str, np.ndarray] = {}
     failed = False
-    preset = _is_preset(settings)
-    for spec in specs:
-        is_spotiflow = spec.family == "spotiflow"
-        if first_t.shape[0] < spec.min_channels:
+    for case in cases:
+        spec = case.spec
+        run_base = {
+            "case": case.key,
+            "step": case.step,
+            "model": spec.id,
+            "target": case.target,
+            "primary_channel": case.primary_channel,
+            "nuclei_channel": case.nuclei_channel,
+        }
+        primary_index = case.primary_channel - 1
+        raw_by_case[case.key] = (
+            np.max(first_t[primary_index], axis=0)
+            if 0 <= primary_index < first_t.shape[0]
+            else np.zeros(first_t.shape[-2:], dtype=first_t.dtype)
+        )
+        required_channels = [case.primary_channel]
+        if case.nuclei_channel > 0:
+            required_channels.append(case.nuclei_channel)
+        if first_t.shape[0] < spec.min_channels or any(
+            channel < 1 or channel > first_t.shape[0]
+            for channel in required_channels
+        ):
             runs.append(
                 {
-                    "model": spec.id,
+                    **run_base,
                     "status": "skipped",
-                    "reason": "incompatible channel count",
+                    "reason": (
+                        f"selected channel outside input channel count "
+                        f"{first_t.shape[0]}"
+                    ),
                 }
             )
             continue
-        if preset:
-            model_target = (
-                settings.target if settings.target in spec.targets else spec.targets[0]
-            )
-        elif is_spotiflow:
-            model_target = "spots"
-        elif settings.target in spec.targets:
-            model_target = settings.target
-        else:
-            runs.append(
-                {
-                    "model": spec.id,
-                    "status": "skipped",
-                    "reason": "incompatible target",
-                }
-            )
-            continue
-        model_settings = replace(settings, target=model_target)
+        model_settings = replace(
+            settings,
+            model=spec.id,
+            target=case.target,
+            primary_channel=case.primary_channel,
+            nuclei_channel=case.nuclei_channel,
+        )
+        if spec.family == "cellpose3" and "bact" in spec.checkpoint.lower() and settings.diameter == 0:
+            model_settings = replace(model_settings, diameter=-1.0)
         try:
             labels, info = segment_czyx(first_t, spec, model_settings, image.scales)
-            labels_by_model[spec.id] = labels
+            labels_by_case[case.key] = labels
             runs.append(
                 {
-                    "model": spec.id,
-                    "target": model_target,
+                    **run_base,
                     "status": "success",
                     **info,
                 }
@@ -232,14 +319,12 @@ def run_benchmark(
             failed = True
             runs.append(
                 {
-                    "model": spec.id,
+                    **run_base,
                     "status": "failed",
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
-    primary = settings.selected_channels(first_t.shape[0])[0]
-    raw_mip = np.max(first_t[primary], axis=0)
-    gallery = _gallery(raw_mip, specs, runs, labels_by_model)
+    gallery = _gallery(cases, raw_by_case, runs, labels_by_case)
     timings = dict(base_timings or {})
     for run in runs:
         for key, value in run.get("timings", {}).items():

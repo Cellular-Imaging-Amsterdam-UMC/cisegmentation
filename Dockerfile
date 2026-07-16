@@ -4,7 +4,7 @@ FROM ${MODEL_CACHE_IMAGE} AS model_cache
 FROM python:3.11-slim-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 \
     CISEGMENTATION_MODELS=/opt/cisegmentation/models \
     CELLPOSE3_LEGACY_LOCAL_MODELS_PATH=/opt/cisegmentation/models/cellpose3 \
     CELLPOSE_LOCAL_MODELS_PATH=/opt/cisegmentation/models/cellpose-sam \
@@ -30,5 +30,8 @@ RUN python /app/tools/download_models.py \
 COPY cisegmentation/ /app/cisegmentation/
 COPY wrapper.py bilayers_cli.py config.yaml /app/
 COPY tools/cuda_smoke.py /app/tools/cuda_smoke.py
-RUN mkdir -p /data/in /data/out
+RUN SITE_PACKAGES="$(python -c 'import site; print(site.getsitepackages()[0])')" \
+    && echo "Precompiling Python bytecode in ${SITE_PACKAGES} and /app" \
+    && python -m compileall -q -j 0 "${SITE_PACKAGES}" /app \
+    && mkdir -p /data/in /data/out
 ENTRYPOINT ["python", "/app/wrapper.py"]

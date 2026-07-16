@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import logging
 import sys
 import time
 from typing import Any, Callable
@@ -13,6 +14,30 @@ from .settings import SegmentationSettings
 
 
 _MODEL_CACHE: dict[tuple[str, str], Any] = {}
+_TRITON_FLOP_WARNING = "triton not found; flop counting will not work for triton kernels"
+
+
+class _TritonFlopWarningFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return _TRITON_FLOP_WARNING not in record.getMessage()
+
+
+_TRITON_FLOP_WARNING_FILTER = _TritonFlopWarningFilter()
+
+
+def _configure_torch_runtime():
+    """Apply explicit PyTorch runtime choices used by every model adapter."""
+    flop_logger = logging.getLogger("torch.utils.flop_counter")
+    if _TRITON_FLOP_WARNING_FILTER not in flop_logger.filters:
+        flop_logger.addFilter(_TRITON_FLOP_WARNING_FILTER)
+
+    import torch
+
+    # Cellpose creates sparse tensors without requesting invariant validation.
+    # Explicit opt-out preserves that fast path and prevents PyTorch from
+    # warning that the implicit default may change.
+    torch.sparse.check_sparse_tensor_invariants.disable()
+    return torch
 
 
 def clear_model_cache() -> None:
@@ -74,7 +99,7 @@ def resolve_device(requested: str) -> str:
         raise ValueError(f"Unsupported device: {requested}")
     if requested == "cpu":
         return "cpu"
-    import torch
+    torch = _configure_torch_runtime()
 
     if requested == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but torch.cuda.is_available() is false")
@@ -124,7 +149,10 @@ def _resize_2d(
     import torch
     import torch.nn.functional as functional
 
-    tensor = torch.as_tensor(np.asarray(array), dtype=torch.float32)[None, None]
+    source = np.asarray(array)
+    if not source.dtype.isnative:
+        source = source.astype(source.dtype.newbyteorder("="), copy=False)
+    tensor = torch.as_tensor(source, dtype=torch.float32)[None, None]
     kwargs = {"size": shape, "mode": "nearest" if labels else "bilinear"}
     if not labels:
         kwargs.update({"align_corners": False, "antialias": True})
@@ -200,11 +228,6 @@ def _segment_cellpose(
 
     def importer():
         if spec.family == "cellpose3":
-            import torch
-
-            # Preserve legacy Cellpose behavior while silencing PyTorch's
-            # sparse-invariant warning explicitly.
-            torch.sparse.check_sparse_tensor_invariants.disable()
             from cellpose3_legacy import models
         else:
             from cellpose import models

@@ -1,6 +1,12 @@
 from pathlib import Path
 
 from bilayers_cli import generate_cli_command, load_config, validate_config
+from cisegmentation.settings import (
+    CELL_MODELS,
+    FOCI_MODELS,
+    STEP1_NUCLEUS_MODELS,
+    STEP2_NUCLEUS_MODELS,
+)
 from wrapper import build_parser
 
 
@@ -18,7 +24,29 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["nucleus_step"]["default"] is False
     assert all(parameters[f"foci_step_{slot}"]["default"] is False for slot in range(1, 5))
     assert parameters["include_original_channels"]["default"] is False
-    assert parameters["remove_border_cells"]["default"] is False
+    assert parameters["remove_border_cells"]["default"] is True
+    assert parameters["remove_border_cells"]["mode"] == "beginner"
+    parameter_names = [item["name"] for item in config["parameters"]]
+    assert parameter_names.index("remove_border_cells") + 1 == parameter_names.index(
+        "foci_step_1"
+    )
+    assert parameters["include_original_channels"]["mode"] == "advanced"
+    assert parameters["benchmark"]["mode"] == "advanced"
+    advanced_names = [
+        item["name"]
+        for item in config["parameters"]
+        if item.get("mode") == "advanced"
+    ]
+    assert advanced_names[:4] == [
+        "foci_model_1",
+        "foci_model_2",
+        "foci_model_3",
+        "foci_model_4",
+    ]
+    assert all(
+        parameters[f"foci_model_{slot}"]["section_id"] == "advanced"
+        for slot in range(1, 5)
+    )
     spot_models = {option["value"] for option in parameters["foci_model_1"]["options"]}
     assert {
         "stardist:SD_Foci_Aggregates",
@@ -26,24 +54,17 @@ def test_bilayers_config_is_structurally_valid():
         "cellpose3:bact_phase_cp3",
         "cellpose3:bact_fluor_cp3",
     } <= spot_models
-    benchmark = parameters["benchmark_models"]
-    assert benchmark["multiselect"] is False
-    assert [option["value"] for option in benchmark["options"]] == [
-        "all",
-        "cellpose",
-        "cellpose3",
-        "stardist",
-        "instanseg",
-        "spotiflow",
-    ]
-    assert [option["label"] for option in benchmark["options"]] == [
-        "All Algorithms, All Models",
-        "Cellpose (SAM), All Models",
-        "Cellpose 3 (Legacy), All Models",
-        "StarDist, All Models",
-        "InstanSeg, All Models",
-        "Spotiflow, All Models",
-    ]
+    assert "benchmark_models" not in parameters
+    assert tuple(option["value"] for option in parameters["cell_model"]["options"]) == CELL_MODELS
+    assert tuple(
+        option["value"] for option in parameters["cell_nuclei_model"]["options"]
+    ) == STEP1_NUCLEUS_MODELS
+    assert tuple(
+        option["value"] for option in parameters["nucleus_model"]["options"]
+    ) == STEP2_NUCLEUS_MODELS
+    assert tuple(
+        option["value"] for option in parameters["foci_model_1"]["options"]
+    ) == FOCI_MODELS
 
 
 def test_wrapper_accepts_hyphenated_bilayers_parameters():

@@ -190,6 +190,14 @@ def _to_tczyx(data: np.ndarray, axes: tuple[str, ...]) -> np.ndarray:
     return np.transpose(result, permutation)
 
 
+def _to_native_byte_order(data: np.ndarray) -> np.ndarray:
+    """Return values in the platform byte order expected by PyTorch models."""
+    array = np.asarray(data)
+    if array.dtype.isnative:
+        return array
+    return array.astype(array.dtype.newbyteorder("="), copy=False)
+
+
 def read_image(resource: ImageResource) -> ImageData:
     import zarr
 
@@ -205,10 +213,16 @@ def read_image(resource: ImageResource) -> ImageData:
     dataset_path = str(multiscale["datasets"][0]["path"])
     array = group[dataset_path]
     raw = np.asarray(array)
+    source_dtype = str(raw.dtype)
     axes = _axis_names(multiscale, raw.ndim)
     scales = _scale_map(multiscale, axes)
     return ImageData(
-        _to_tczyx(raw, axes), axes, scales, attrs, resource, str(raw.dtype)
+        _to_native_byte_order(_to_tczyx(raw, axes)),
+        axes,
+        scales,
+        attrs,
+        resource,
+        source_dtype,
     )
 
 

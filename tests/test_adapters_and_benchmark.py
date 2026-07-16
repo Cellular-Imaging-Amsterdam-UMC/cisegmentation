@@ -1,9 +1,9 @@
 import numpy as np
-import pytest
 
 from cisegmentation.adapters import (
     _cached_model,
     _cellpose_diameter_pixels,
+    _configure_torch_runtime,
     _segment_instanseg,
     _spotiflow_min_distance_pixels,
     _stardist_versatile_input,
@@ -11,7 +11,7 @@ from cisegmentation.adapters import (
     points_to_labels,
 )
 from cisegmentation.registry import get_model_spec
-from cisegmentation.benchmark import _benchmark_specs, center_crop, run_benchmark
+from cisegmentation.benchmark import _benchmark_cases, center_crop, run_benchmark
 from cisegmentation.ome_zarr_io import enumerate_resources, read_image
 from cisegmentation.settings import SegmentationSettings
 
@@ -52,6 +52,20 @@ def test_process_model_cache_is_keyed_by_model_and_device():
     clear_model_cache()
 
 
+def test_torch_runtime_suppresses_only_irrelevant_triton_warning(capsys):
+    import logging
+
+    torch = _configure_torch_runtime()
+    assert not torch.sparse.check_sparse_tensor_invariants.is_enabled()
+
+    logger = logging.getLogger("torch.utils.flop_counter")
+    logger.warning("triton not found; flop counting will not work for triton kernels")
+    logger.warning("a different PyTorch warning")
+    captured = capsys.readouterr()
+    assert "triton not found" not in captured.err
+    assert "a different PyTorch warning" in captured.err
+
+
 def test_spotiflow_points_are_unique_single_pixels():
     points = np.array([[2.2, 3.7], [5.0, 6.0]])
     labels = points_to_labels(points, (10, 10))
@@ -68,7 +82,7 @@ def test_physical_parameters_are_converted_from_ome_zarr_pixel_size():
 
 
 def test_stardist_versatile_downsamples_finer_than_half_micron():
-    image = np.zeros((80, 100), dtype=np.uint16)
+    image = np.zeros((80, 100), dtype=">u2")
     resized, original_shape = _stardist_versatile_input(
         image, {"y": 0.25, "x": 0.4}
     )
@@ -112,7 +126,10 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
         ),
     )
     settings = SegmentationSettings(
-        target="nuclei", benchmark=True, benchmark_models="stardist"
+        benchmark=True,
+        cell_step=False,
+        nucleus_step=True,
+        nucleus_channel=1,
     )
     output, failed = run_benchmark(image, settings, outputfolder)
     assert not failed
@@ -126,37 +143,42 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
     assert root.attrs["cisegmentation"]["layout"] == (
         "2d-xy-input-and-segmentation-panels"
     )
-    assert [run["target"] for run in root.attrs["cisegmentation"]["runs"]] == [
-        "nuclei",
-        "foci",
-        "foci",
-    ]
+    runs = root.attrs["cisegmentation"]["runs"]
+    assert len(runs) == 5
+    assert {run["step"] for run in runs} == {"Step 2 nuclei"}
+    assert {run["target"] for run in runs} == {"nuclei"}
 
 
-def test_all_benchmark_includes_spotiflow():
-    settings = SegmentationSettings(target="nuclei", benchmark_models="all")
-    ids = {spec.id for spec in _benchmark_specs(settings, 1)}
-    assert "spotiflow:general" in ids
-    assert "spotiflow:smfish_3d" in ids
+def test_benchmark_uses_every_model_offered_for_enabled_steps():
+    settings = SegmentationSettings(
+        cell_step=True,
+        cell_method="deep-learning",
+        cell_channel=3,
+        cell_nuclei_channel=1,
+        nucleus_step=False,
+        foci_step_2=True,
+        foci_channel_2=2,
+    )
+    cases = _benchmark_cases(settings)
+    assert len(cases) == 3 + 4 + 10
+    assert {case.step for case in cases} == {
+        "Step 1 cells",
+        "Step 1 nuclei",
+        "Step 3b foci",
+    }
+    foci = [case for case in cases if case.step == "Step 3b foci"]
+    assert {case.spec.family for case in foci} == {
+        "spotiflow",
+        "stardist",
+        "cellpose3",
+    }
+    assert {case.primary_channel for case in foci} == {2}
 
 
-@pytest.mark.parametrize(
-    "preset,expected_families,expected_count",
-    [
-        (
-            "all",
-            {"cellpose3", "cellpose-sam", "stardist", "instanseg", "spotiflow"},
-            38,
-        ),
-        ("cellpose", {"cellpose-sam"}, 1),
-        ("cellpose3", {"cellpose3"}, 25),
-        ("stardist", {"stardist"}, 3),
-        ("instanseg", {"instanseg"}, 3),
-        ("spotiflow", {"spotiflow"}, 6),
-    ],
-)
-def test_benchmark_family_presets(preset, expected_families, expected_count):
-    settings = SegmentationSettings(target="nuclei", benchmark_models=preset)
-    specs = _benchmark_specs(settings, 1)
-    assert {spec.family for spec in specs} == expected_families
-    assert len(specs) == expected_count
+def test_expansion_benchmark_uses_all_selectable_seed_models():
+    cases = _benchmark_cases(
+        SegmentationSettings(cell_method="cell-expansion", cell_channel=1)
+    )
+    assert len(cases) == 4
+    assert {case.step for case in cases} == {"Step 1 expansion nuclei"}
+    assert {case.target for case in cases} == {"nuclei"}

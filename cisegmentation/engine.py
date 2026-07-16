@@ -434,8 +434,7 @@ def run_workflow(
 ) -> list[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    if not settings.benchmark:
-        settings.validate_steps()
+    settings.validate_steps()
     stores = discover_ome_zarrs(input_dir)
     if not stores:
         raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")

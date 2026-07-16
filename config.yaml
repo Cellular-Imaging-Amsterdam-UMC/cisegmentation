@@ -120,6 +120,7 @@ parameters:
   section_id: essential
   mode: beginner
 - {name: nucleus_channel, type: integer, label: Step 2 Nucleus Channel, description: One-based signal channel used for independent nuclei detection., default: 1, minimum: 1, cli_tag: --nucleus-channel, cli_order: 22, optional: true, section_id: essential, mode: beginner}
+- {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
 - {name: foci_step_1, type: checkbox, label: "Step 3a: Foci Detection", description: Enable the first independent foci/spot detection slot., default: false, cli_tag: --foci-step-1, cli_order: 30, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: foci_model_1
   type: dropdown
@@ -130,20 +131,19 @@ parameters:
   cli_tag: --foci-model-1
   cli_order: 31
   optional: true
-  section_id: essential
-  mode: beginner
+  section_id: advanced
+  mode: advanced
 - {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 2, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
 - {name: foci_step_2, type: checkbox, label: "Step 3b: Foci Detection", description: Enable the second independent foci/spot detection slot., default: false, cli_tag: --foci-step-2, cli_order: 33, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_2, type: dropdown, label: Step 3b Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_2, type: dropdown, label: Step 3b Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 2, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: essential, mode: beginner}
 - {name: foci_step_3, type: checkbox, label: "Step 3c: Foci Detection", description: Enable the third independent foci/spot detection slot., default: false, cli_tag: --foci-step-3, cli_order: 36, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_3, type: dropdown, label: Step 3c Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_3, type: dropdown, label: Step 3c Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 2, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: essential, mode: beginner}
 - {name: foci_step_4, type: checkbox, label: "Step 3d: Foci Detection", description: Enable the fourth independent foci/spot detection slot., default: false, cli_tag: --foci-step-4, cli_order: 39, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_4, type: dropdown, label: Step 3d Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_4, type: dropdown, label: Step 3d Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 2, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: essential, mode: beginner}
-- {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: false, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: false, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
+- {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: false, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - name: device
   type: dropdown
   label: Compute Device
@@ -175,22 +175,4 @@ parameters:
 - {name: stardist_nms_threshold, type: float, label: StarDist NMS Threshold, description: Non-maximum-suppression overlap threshold. Use -1 to read the model-specific nms value from thresholds.json., default: -1.0, cli_tag: --stardist-nms-threshold, cli_order: 24, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_prob_threshold, type: float, label: Spotiflow Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --spotiflow-prob-threshold, cli_order: 26, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_min_distance, type: float, label: Spotiflow Minimum Distance (µm), description: Minimum detected-point separation in µm, converted using OME-Zarr XY pixel size., default: 1.0, minimum: 0.0, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: advanced, mode: advanced}
-- {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Run selected models on first T and a centered maximum 1024x1024 ROI; write one rendered 2D XY RGB OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 30, optional: true, append_value: true, section_id: benchmark, mode: beginner}
-- name: benchmark_models
-  type: dropdown
-  label: Benchmark Models
-  description: Select an algorithm-family preset. Every model in the preset is benchmarked using a supported target.
-  options:
-  - {label: 'All Algorithms, All Models', value: all}
-  - {label: 'Cellpose (SAM), All Models', value: cellpose}
-  - {label: 'Cellpose 3 (Legacy), All Models', value: cellpose3}
-  - {label: 'StarDist, All Models', value: stardist}
-  - {label: 'InstanSeg, All Models', value: instanseg}
-  - {label: 'Spotiflow, All Models', value: spotiflow}
-  default: all
-  multiselect: false
-  cli_tag: --benchmark-models
-  cli_order: 31
-  optional: true
-  section_id: benchmark
-  mode: beginner
+- {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Benchmark every model offered for each enabled segmentation step on first T and a centered maximum 1024x1024 ROI; write one rendered 2D XY RGB OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 44, optional: true, append_value: true, section_id: advanced, mode: advanced}

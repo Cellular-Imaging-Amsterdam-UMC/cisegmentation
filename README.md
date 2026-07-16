@@ -47,16 +47,18 @@ Benchmark example:
 
 ```powershell
 python wrapper.py --infolder inputfolder --outfolder outputfolder `
-  --benchmark true --benchmark-models all --target nuclei --device cuda
+  --cell-step false --nucleus-step true --nucleus-channel 1 `
+  --benchmark true --device cuda
 ```
 
 Benchmark mode selects the first input/field and first timepoint, center-crops
 XY to at most 1024×1024, and writes one rendered 2D XY RGB OME-Zarr montage.
 Like the QuPath extension gallery, it places input projections above colored
 segmentation results and includes model names, object counts, runtimes, skips,
-and failures in the image. Presets cover every model, Cellpose-SAM only,
-legacy Cellpose 3 only, StarDist, InstanSeg, or Spotiflow. Each preset runs
-every model in that family using a target supported by that model.
+and failures in the image. It benchmarks every model offered by each enabled
+workflow step, using that step's configured input channel. Separate enabled
+Step 3a–3d slots are benchmarked independently, including when they use the
+same channel.
 
 ## Parameters
 
@@ -71,8 +73,8 @@ converted internally using the OME-Zarr XY scale metadata.
 | Step 1 Expansion Nucleus Model / Distance | Selects the nucleus seed model and maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
 | Step 2: Nuclei Detection / Model / Channel | Optionally segments nuclei independently. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained and cells without nuclei are removed. Cytoplasm is then always written as cell minus nucleus, with corresponding gray-value IDs. |
 | Step 3a–3d: Foci Detection / Model / Channel | Up to four independent one-based channels, each with its own Spotiflow, `SD_Foci_*` StarDist, or Cellpose 3 `bact` model. Repeating a channel is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
-| Include Original Data Channels (`--include-original-channels`) | Prepends all source channels before the label channels. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
-| Remove Border Cells (`--remove-border-cells`) | Removes cells touching an XY image edge and propagates removal to matched nuclei and derived cytoplasm. Z-stack endpoints are not treated as image borders. |
+| Include Original Data Channels (`--include-original-channels`) | Advanced option. Prepends all source channels before the label channels. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
+| Remove Border Cells (`--remove-border-cells`) | Advanced option, enabled by default. Removes cells touching an XY image edge and propagates removal to matched nuclei and derived cytoplasm. Z-stack endpoints are not treated as image borders. |
 | Compute Device (`--device`) | `auto` selects CUDA when available; `cuda` requires a GPU; `cpu` forces CPU inference. |
 | Dimension Mode (`--dimension-mode`) | `auto` uses native 3D where supported; `slice-2d` independently segments and relabels every Z plane. |
 | Cellpose Diameter (`--diameter`) | Object diameter in µm, converted using mean XY pixel size. `0` resolves to 12 µm for nuclei or 25 µm for cells; a negative value uses the model default. |
@@ -82,8 +84,7 @@ converted internally using the OME-Zarr XY scale metadata.
 | StarDist NMS Threshold (`--stardist-nms-threshold`) | Allowed overlap during non-maximum suppression. `-1` loads `nms` from `thresholds.json`. |
 | Spotiflow Probability Threshold (`--spotiflow-prob-threshold`) | Spot acceptance threshold. `-1` uses the checkpoint default. |
 | Spotiflow Minimum Distance (`--spotiflow-min-distance`) | Minimum separation in µm, converted to pixels from the mean XY pixel size. |
-| Benchmark Gallery (`--benchmark`) | Processes the first deterministic image/field and first timepoint, then writes only a 2D XY OME-Zarr gallery. |
-| Benchmark Models (`--benchmark-models`) | Chooses all models or every model in the selected algorithm family. |
+| Benchmark Gallery (`--benchmark`) | Advanced option. Processes the first deterministic image/field and first timepoint, runs all selectable models for every enabled step, then writes only a 2D XY OME-Zarr gallery. |
 
 `SD_Nuclei_Versatile` is automatically downsampled to 0.5 µm/px per XY axis
 when the source resolution is finer, and its labels are restored to the source

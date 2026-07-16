@@ -592,7 +592,7 @@ class Window(QMainWindow):
 
     def _validate_run_selection(self) -> bool:
         values = self.values()
-        if values.get("benchmark") or any(
+        if any(
             values.get(name)
             for name in (
                 "cell_step",

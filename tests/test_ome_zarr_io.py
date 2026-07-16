@@ -25,6 +25,15 @@ def test_discover_and_read_staged_ome_zarrs(inputfolder):
     assert image.scales["x"] == 0.5
 
 
+def test_read_converts_big_endian_pixels_to_native_order(inputfolder):
+    image = read_image(
+        enumerate_resources(inputfolder / "nuclei-spots-cytoplasm.ome.zarr")[0]
+    )
+    assert image.source_dtype == ">u2"
+    assert image.data.dtype == np.dtype("uint16")
+    assert image.data.dtype.isnative
+
+
 def test_discover_accepts_biomero_zarr_name(tmp_path):
     store = tmp_path / "renamed-by-biomero.zarr"
     store.mkdir()
