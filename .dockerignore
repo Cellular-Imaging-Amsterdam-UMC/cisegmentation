@@ -1,6 +1,7 @@
 .git
 .gitignore
 .pytest_cache
+.cache
 .ruff_cache
 __pycache__
 *.pyc
@@ -9,6 +10,7 @@ inputfolder
 outputfolder
 tests/inputfolder
 tests/outputfolder
+tests
 dist
 build
 *.egg-info

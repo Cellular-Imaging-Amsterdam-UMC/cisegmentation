@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -11,9 +11,11 @@ from PIL import Image, ImageDraw, ImageFont
 from .adapters import segment_czyx
 from .ome_zarr_io import ImageData, write_rgb_gallery
 from .registry import ModelSpec, get_model_spec
+from .reporting import emit, format_step_record, step_record
 from .settings import (
     CELL_MODELS,
     FOCI_MODELS,
+    SKIP,
     STEP1_NUCLEUS_MODELS,
     STEP2_NUCLEUS_MODELS,
     SegmentationSettings,
@@ -76,13 +78,13 @@ def _benchmark_cases(settings: SegmentationSettings) -> list[BenchmarkCase]:
                 )
             )
 
-    if settings.cell_step:
-        if settings.cell_method == "cell-expansion":
+    if settings.cell_model != SKIP:
+        if settings.cell_expansion_model() is not None:
             add(
                 "Step 1 expansion nuclei",
                 STEP1_NUCLEUS_MODELS,
                 "nuclei",
-                settings.cell_channel,
+                settings.cell_expansion_channel(),
             )
         else:
             add(
@@ -92,14 +94,7 @@ def _benchmark_cases(settings: SegmentationSettings) -> list[BenchmarkCase]:
                 settings.cell_channel,
                 settings.cell_nuclei_channel,
             )
-            if settings.cell_nuclei_channel > 0 and not settings.nucleus_step:
-                add(
-                    "Step 1 nuclei",
-                    STEP1_NUCLEUS_MODELS,
-                    "nuclei",
-                    settings.cell_nuclei_channel,
-                )
-    if settings.nucleus_step:
+    if settings.nucleus_model != SKIP:
         add(
             "Step 2 nuclei",
             STEP2_NUCLEUS_MODELS,
@@ -254,10 +249,12 @@ def run_benchmark(
     output_dir: str | Path,
     *,
     base_timings: dict[str, float] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[Path, bool]:
     settings.validate_steps()
     first_t, crop = center_crop(image.data[0])
     cases = _benchmark_cases(settings)
+    emit(log, f"Benchmark gallery: running {len(cases)} model/channel case(s).")
     runs: list[dict[str, Any]] = []
     labels_by_case: dict[str, np.ndarray] = {}
     raw_by_case: dict[str, np.ndarray] = {}
@@ -295,6 +292,7 @@ def run_benchmark(
                     ),
                 }
             )
+            emit(log, f"  {case.step} | {spec.id} | skipped: channel outside input")
             continue
         model_settings = replace(
             settings,
@@ -308,11 +306,25 @@ def run_benchmark(
         try:
             labels, info = segment_czyx(first_t, spec, model_settings, image.scales)
             labels_by_case[case.key] = labels
+            record = step_record(
+                step=case.step,
+                timepoint=0,
+                model=spec.id,
+                target=case.target,
+                primary_channel=case.primary_channel,
+                nuclei_channel=case.nuclei_channel,
+                labels=labels,
+                info=info,
+                scales=image.scales,
+            )
+            for line in format_step_record(record):
+                emit(log, line)
             runs.append(
                 {
                     **run_base,
                     "status": "success",
                     **info,
+                    "label_statistics": record["label_statistics"],
                 }
             )
         except Exception as exc:
@@ -324,6 +336,7 @@ def run_benchmark(
                     "error": f"{type(exc).__name__}: {exc}",
                 }
             )
+            emit(log, f"  {case.step} | {spec.id} | failed: {type(exc).__name__}: {exc}")
     gallery = _gallery(cases, raw_by_case, runs, labels_by_case)
     timings = dict(base_timings or {})
     for run in runs:

@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pytest
 
@@ -55,6 +57,9 @@ def test_write_standalone_int32_label_zarr(inputfolder, outputfolder):
     root = zarr.open_group(str(output), mode="r")
     assert root["0"].dtype == np.dtype("int32")
     assert root["0"].shape == labels.shape
+    assert json.loads((output / "0" / ".zarray").read_text(encoding="utf-8"))[
+        "dimension_separator"
+    ] == "/"
     np.testing.assert_array_equal(np.asarray(root["0"]), labels)
     assert root.attrs["multiscales"][0]["version"] == "0.4"
     channel = root.attrs["omero"]["channels"][0]
@@ -118,6 +123,61 @@ def test_writer_can_prepend_original_channels_without_changing_labels(
     channels = root.attrs["omero"]["channels"]
     assert "lookupTable" not in channels[0]
     assert channels[-1]["lookupTable"] == "glasbey_inverted.lut"
+
+
+def test_writer_can_store_native_ome_zarr_04_label_images(inputfolder, outputfolder):
+    source = read_image(
+        enumerate_resources(inputfolder / "nuclei-spots-cytoplasm.ome.zarr")[0]
+    )
+    labels = np.zeros(
+        (source.data.shape[0], 2, *source.data.shape[2:]), dtype=np.uint32
+    )
+    labels[0, 0, 0, 10:20, 10:20] = 7
+    labels[0, 1, 0, 30:35, 30:35] = 2
+    result = LabelResult(
+        labels,
+        source,
+        "multi-step",
+        "multi-step",
+        channel_labels=["labels_spots_channel_2", "labels_spots_channel_2"],
+        include_original_channels=False,
+        write_ome_zarr_labels=True,
+    )
+
+    output = write_label_image(result, outputfolder / "native-labels.ome.zarr")
+    root = zarr.open_group(str(output), mode="r")
+
+    assert root["0"].dtype == source.data.dtype
+    np.testing.assert_array_equal(np.asarray(root["0"]), source.data)
+    assert root["0"].shape[1] == source.data.shape[1]
+    assert root["labels"].attrs["labels"] == [
+        "labels_spots_channel_2",
+        "labels_spots_channel_2_2",
+    ]
+    first = root["labels/labels_spots_channel_2"]
+    second = root["labels/labels_spots_channel_2_2"]
+    np.testing.assert_array_equal(np.asarray(first["0"]), labels[:, 0:1])
+    np.testing.assert_array_equal(np.asarray(second["0"]), labels[:, 1:2])
+    assert first.attrs["image-label"] == {
+        "version": "0.4",
+        "source": {"image": "../../"},
+    }
+    assert first.attrs["multiscales"][0]["version"] == "0.4"
+    assert root.attrs["cisegmentation"]["output_layout"] == (
+        "ome-zarr-0.4-labels"
+    )
+    assert json.loads((output / "0" / ".zarray").read_text(encoding="utf-8"))[
+        "dimension_separator"
+    ] == "/"
+    for group_name in root["labels"].attrs["labels"]:
+        assert json.loads(
+            (output / "labels" / group_name / "0" / ".zarray").read_text(
+                encoding="utf-8"
+            )
+        )["dimension_separator"] == "/"
+    assert 'Type="uint16"' in (
+        output / "OME" / "METADATA.ome.xml"
+    ).read_text(encoding="utf-8")
 
 
 def test_included_float_channels_are_rounded_to_int32(inputfolder, outputfolder):

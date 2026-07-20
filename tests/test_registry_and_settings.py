@@ -26,17 +26,17 @@ def test_channel_selection_is_one_based_and_validated():
 
 def test_four_independent_foci_slots_retain_duplicate_channels():
     settings = SegmentationSettings(
-        foci_step_1=True,
+        foci_model_1="spotiflow:general",
         foci_channel_1=2,
-        foci_step_2=True,
+        foci_model_2="spotiflow:hybiss",
         foci_channel_2=2,
-        foci_step_4=True,
+        foci_model_4="stardist:SD_Foci_Finn",
         foci_channel_4=3,
     )
     assert settings.enabled_foci_steps() == [
         (1, "spotiflow:general", 2),
-        (2, "spotiflow:general", 2),
-        (4, "spotiflow:general", 3),
+        (2, "spotiflow:hybiss", 2),
+        (4, "stardist:SD_Foci_Finn", 3),
     ]
 
 

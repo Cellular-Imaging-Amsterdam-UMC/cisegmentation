@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import time
 from typing import Any, Iterable
@@ -45,6 +46,7 @@ class LabelResult:
     provenance: dict[str, Any] = field(default_factory=dict)
     channel_labels: list[str] | None = None
     include_original_channels: bool = False
+    write_ome_zarr_labels: bool = False
 
 
 def _attrs(group) -> dict[str, Any]:
@@ -391,11 +393,24 @@ def _ome_xml(
         'SamplesPerPixel="1"/>'
         for index, channel in enumerate(channels_metadata)
     )
+    dtype = np.dtype(pixels.dtype)
+    ome_type = {
+        np.dtype("uint8"): "uint8",
+        np.dtype("int8"): "int8",
+        np.dtype("uint16"): "uint16",
+        np.dtype("int16"): "int16",
+        np.dtype("uint32"): "uint32",
+        np.dtype("int32"): "int32",
+        np.dtype("float32"): "float",
+        np.dtype("float64"): "double",
+    }.get(dtype)
+    if ome_type is None:
+        raise TypeError(f"OME-XML does not support output dtype {dtype}")
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         '<OME xmlns="http://www.openmicroscopy.org/Schemas/OME/2016-06">'
         f'<Image ID="Image:0" Name="{name}"><Pixels ID="Pixels:0" DimensionOrder="XYZCT" '
-        f'Type="int32" SizeX="{x}" SizeY="{y}" SizeZ="{z}" SizeC="{c}" SizeT="{t}" '
+        f'Type="{ome_type}" SizeX="{x}" SizeY="{y}" SizeZ="{z}" SizeC="{c}" SizeT="{t}" '
         f'PhysicalSizeX="{px_x}" PhysicalSizeY="{px_y}" PhysicalSizeZ="{px_z}">'
         f"{channels}"
         "</Pixels></Image></OME>"
@@ -411,7 +426,12 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
     for index, level in enumerate(levels):
         chunks = (1, 1, 1, min(512, level.shape[-2]), min(512, level.shape[-1]))
         array = group.create_dataset(
-            str(index), shape=level.shape, data=level, chunks=chunks, overwrite=True
+            str(index),
+            shape=level.shape,
+            data=level,
+            chunks=chunks,
+            overwrite=True,
+            dimension_separator="/",
         )
         array.attrs["_ARRAY_DIMENSIONS"] = ["t", "c", "z", "y", "x"]
         datasets.append(
@@ -467,6 +487,150 @@ def _write_image_group(group, result: LabelResult, name: str) -> None:
     )
 
 
+def _label_group_names(result: LabelResult) -> list[str]:
+    """Return safe, unique group names without changing displayed label names."""
+    labels = result.channel_labels or [f"labels_{result.target}"]
+    names: list[str] = []
+    used: set[str] = set()
+    for index, label in enumerate(labels, start=1):
+        base = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(label)).strip("_.-")
+        base = base or f"labels_{index}"
+        candidate = base
+        suffix = 2
+        while candidate in used:
+            candidate = f"{base}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        names.append(candidate)
+    return names
+
+
+def _write_native_ome_zarr_labels(group, result: LabelResult, name: str) -> None:
+    """Write an NGFF 0.4 image with associated image-label groups."""
+    source_pixels = np.asarray(result.source.data)
+    source_levels = [source_pixels]
+    while min(source_levels[-1].shape[-2:]) >= 512 and len(source_levels) < 5:
+        source_levels.append(_downsample_labels(source_levels[-1]))
+
+    source_datasets = []
+    for index, level in enumerate(source_levels):
+        chunks = (1, 1, 1, min(512, level.shape[-2]), min(512, level.shape[-1]))
+        array = group.create_dataset(
+            str(index),
+            shape=level.shape,
+            data=level,
+            chunks=chunks,
+            overwrite=True,
+            dimension_separator="/",
+        )
+        array.attrs["_ARRAY_DIMENSIONS"] = ["t", "c", "z", "y", "x"]
+        source_datasets.append(
+            {
+                "path": str(index),
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": _scale_values(result.source, 2**index)}
+                ],
+            }
+        )
+    group.attrs["multiscales"] = [
+        {
+            "version": "0.4",
+            "name": name,
+            "axes": _axis_metadata(),
+            "datasets": source_datasets,
+        }
+    ]
+    source_channels = _source_channel_metadata(result, source_pixels.shape[1])
+    group.attrs["omero"] = {
+        "version": "0.4",
+        "name": name,
+        "channels": source_channels,
+        "rdefs": {"defaultT": 0, "defaultZ": 0, "model": "color"},
+    }
+
+    labels = np.asarray(result.labels)
+    label_names = result.channel_labels or [f"labels_{result.target}"]
+    if labels.shape[1] != len(label_names):
+        raise ValueError(
+            "The number of label channels does not match the channel label names"
+        )
+    group_names = _label_group_names(result)
+    labels_group = group.require_group("labels")
+    labels_group.attrs["labels"] = group_names
+    for label_index, (group_name, display_name) in enumerate(
+        zip(group_names, label_names)
+    ):
+        label_group = labels_group.require_group(group_name)
+        label_levels = [labels[:, label_index : label_index + 1]]
+        while min(label_levels[-1].shape[-2:]) >= 512 and len(label_levels) < 5:
+            label_levels.append(_downsample_labels(label_levels[-1]))
+        datasets = []
+        for level_index, level in enumerate(label_levels):
+            chunks = (
+                1,
+                1,
+                1,
+                min(512, level.shape[-2]),
+                min(512, level.shape[-1]),
+            )
+            array = label_group.create_dataset(
+                str(level_index),
+                shape=level.shape,
+                data=level,
+                chunks=chunks,
+                overwrite=True,
+                dimension_separator="/",
+            )
+            array.attrs["_ARRAY_DIMENSIONS"] = ["t", "c", "z", "y", "x"]
+            datasets.append(
+                {
+                    "path": str(level_index),
+                    "coordinateTransformations": [
+                        {
+                            "type": "scale",
+                            "scale": _scale_values(result.source, 2**level_index),
+                        }
+                    ],
+                }
+            )
+        label_group.attrs["multiscales"] = [
+            {
+                "version": "0.4",
+                "name": str(display_name),
+                "axes": _axis_metadata(),
+                "datasets": datasets,
+            }
+        ]
+        label_group.attrs["image-label"] = {
+            "version": "0.4",
+            "source": {"image": "../../"},
+        }
+
+    group.attrs["cisegmentation"] = {
+        "model": result.model_id,
+        "target": result.target,
+        "source": result.source.resource.store_path.name,
+        "storage_dtype": str(source_pixels.dtype),
+        "label_storage_dtype": str(labels.dtype),
+        "output_layout": "ome-zarr-0.4-labels",
+        "label_groups": [f"labels/{group_name}" for group_name in group_names],
+        **result.provenance,
+    }
+    store_root = getattr(group.store, "path", None) or getattr(
+        group.store, "root", None
+    )
+    if store_root is None:
+        raise RuntimeError(
+            "OME-XML sidecar writing requires a local directory-backed Zarr store"
+        )
+    ome = Path(store_root) / group.path / "OME"
+    ome.mkdir(parents=True, exist_ok=True)
+    (ome / ".zgroup").write_text(json.dumps({"zarr_format": 2}), encoding="utf-8")
+    (ome / "METADATA.ome.xml").write_text(
+        _ome_xml(result, name, source_pixels, source_channels), encoding="utf-8"
+    )
+
+
 def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
     import zarr
 
@@ -476,7 +640,12 @@ def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
     if temporary.exists():
         shutil.rmtree(temporary)
     root = zarr.open_group(str(temporary), mode="w", zarr_version=2)
-    _write_image_group(root, result, output_path.name.removesuffix(".ome.zarr"))
+    writer = (
+        _write_native_ome_zarr_labels
+        if result.write_ome_zarr_labels
+        else _write_image_group
+    )
+    writer(root, result, output_path.name.removesuffix(".ome.zarr"))
     _set_write_timing(root, write_started)
     root.store.close()
     if output_path.exists():
@@ -515,6 +684,7 @@ def write_rgb_gallery(
             shape=level.shape,
             chunks=(1, 1, 1, min(512, level.shape[-2]), min(512, level.shape[-1])),
             overwrite=True,
+            dimension_separator="/",
         )
         array.attrs["_ARRAY_DIMENSIONS"] = ["t", "c", "z", "y", "x"]
         datasets.append(
@@ -609,7 +779,12 @@ def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> 
         well_path = f"{row}/{column}"
         wells.setdefault(well_path, []).append(field)
         group = root.require_group(f"{well_path}/{field}")
-        _write_image_group(group, result, f"{output_path.stem}_{row}_{column}_{field}")
+        writer = (
+            _write_native_ome_zarr_labels
+            if result.write_ome_zarr_labels
+            else _write_image_group
+        )
+        writer(group, result, f"{output_path.stem}_{row}_{column}_{field}")
     for well_path, fields in wells.items():
         well = root.require_group(well_path)
         well.attrs["well"] = {

@@ -17,6 +17,8 @@ import queue
 import time
 from typing import Any, Callable, Iterable
 
+from .settings import normalize_legacy_workflow_values
+
 
 WORKFLOW = "cisegmentation"
 DEFAULT_BIOMERO_ROOT = Path(r"E:\NL-BIOMERO")
@@ -310,6 +312,7 @@ class RoundtripRunner:
         timeout: int = 6 * 60 * 60,
         emit: Callable[[str], None] = print,
     ):
+        parameters = normalize_legacy_workflow_values(parameters)
         self.root = root.resolve()
         self.input_dir = input_dir.resolve()
         self.output_dir = output_dir.resolve()

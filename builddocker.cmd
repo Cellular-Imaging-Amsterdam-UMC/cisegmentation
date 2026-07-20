@@ -27,7 +27,32 @@ if errorlevel 1 (
 ) else (
   echo Reusing validated Docker model-cache image %MODEL_CACHE_ID%.
 )
-docker build %* --build-arg MODEL_CACHE_IMAGE=w_cisegmentation-model-cache:%MODEL_CACHE_ID% -t w_cisegmentation:%VERSION% -t w_cisegmentation:latest .
+set "RUNTIME_CACHE_ID_FILE=%TEMP%\cisegmentation-runtime-cache-id-%RANDOM%.txt"
+"%PYTHON_EXE%" tools\docker_runtime_cache_id.py --model-cache-id %MODEL_CACHE_ID% > "%RUNTIME_CACHE_ID_FILE%"
+if errorlevel 1 (
+  del "%RUNTIME_CACHE_ID_FILE%" >nul 2>&1
+  popd
+  endlocal & exit /b 1
+)
+set /p RUNTIME_CACHE_ID=<"%RUNTIME_CACHE_ID_FILE%"
+del "%RUNTIME_CACHE_ID_FILE%" >nul 2>&1
+if not defined RUNTIME_CACHE_ID (
+  popd
+  endlocal & exit /b 1
+)
+docker image inspect w_cisegmentation-runtime-cache:%RUNTIME_CACHE_ID% >nul 2>&1
+if errorlevel 1 (
+  echo Building Docker runtime-cache image %RUNTIME_CACHE_ID%...
+  echo This happens only when the base image, requirements, model validation, or model cache changes.
+  docker build -f Dockerfile.runtime --build-arg MODEL_CACHE_IMAGE=w_cisegmentation-model-cache:%MODEL_CACHE_ID% -t w_cisegmentation-runtime-cache:%RUNTIME_CACHE_ID% -t w_cisegmentation-runtime-cache:latest .
+  if errorlevel 1 (
+    popd
+    endlocal & exit /b 1
+  )
+) else (
+  echo Reusing Docker runtime-cache image %RUNTIME_CACHE_ID%.
+)
+docker build %* --build-arg RUNTIME_CACHE_IMAGE=w_cisegmentation-runtime-cache:%RUNTIME_CACHE_ID% -t w_cisegmentation:%VERSION% -t w_cisegmentation:latest .
 set "EXITCODE=%ERRORLEVEL%"
 if "%EXITCODE%"=="0" (
   "%PYTHON_EXE%" tools\docker_build_state.py record --image w_cisegmentation:latest

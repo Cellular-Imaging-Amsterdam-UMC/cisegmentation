@@ -59,91 +59,52 @@ outputs:
   pyramidal: true
 display_only: []
 parameters:
-- {name: cell_step, type: checkbox, label: "Step 1: Cell Detection", description: Enable cell detection. This is the only step enabled by default., default: true, cli_tag: --cell-step, cli_order: 10, optional: true, append_value: true, section_id: essential, mode: beginner}
-- name: cell_method
-  type: dropdown
-  label: Step 1 Method
-  description: Use a cell-segmentation model, or segment nuclei from the Step 1 primary channel and expand those labels into cells.
-  options: [{label: Deep-learning cell segmentation, value: deep-learning}, {label: Nucleus segmentation + cell expansion, value: cell-expansion}]
-  default: deep-learning
-  cli_tag: --cell-method
-  cli_order: 11
-  optional: true
-  section_id: essential
-  mode: beginner
 - name: cell_model
   type: dropdown
-  label: Step 1 Cell Model
-  description: Cell model used when Step 1 Method is deep-learning.
-  options: [{label: Cellpose 3 cyto3, value: 'cellpose3:cyto3'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}]
+  label: "Step 1: Cell Detection"
+  description: Skip Step 1, segment cells directly with one model, or segment nuclei with the selected model and expand them into cells.
+  options: [{label: Skip, value: skip}, {label: Cellpose 3 cyto3, value: 'cellpose3:cyto3'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}, {label: Cell expansion using Cellpose 3 nuclei, value: 'expand:cellpose3:nuclei'}, {label: Cell expansion using Cellpose-SAM, value: 'expand:cellpose-sam:cpsam'}, {label: Cell expansion using StarDist nuclei versatile, value: 'expand:stardist:SD_Nuclei_Versatile'}, {label: Cell expansion using InstanSeg single-channel nuclei, value: 'expand:instanseg:single_channel_nuclei'}]
   default: 'cellpose3:cyto3'
   cli_tag: --cell-model
-  cli_order: 12
+  cli_order: 10
   optional: true
   section_id: essential
   mode: beginner
-- {name: cell_channel, type: integer, label: Step 1 Primary Channel, description: One-based cell/cytoplasm channel for deep-learning, or nuclei channel for cell expansion., default: 3, minimum: 1, cli_tag: --cell-channel, cli_order: 13, optional: true, section_id: essential, mode: beginner}
-- {name: cell_nuclei_channel, type: integer, label: Step 1 Optional Nuclei Channel, description: Optional one-based nuclei input supplied to the cell model and independently segmented for cell/nucleus matching; use 0 for cell labels only., default: 1, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 14, optional: true, section_id: essential, mode: beginner}
-- name: cell_nuclei_model
-  type: dropdown
-  label: Step 1 Nucleus Model
-  description: Nucleus model used on the optional Step 1 nuclei channel so cells without nuclei can be removed and matching nucleus/cytoplasm labels can be written.
-  options: [{label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}, {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}]
-  default: 'cellpose3:nuclei'
-  cli_tag: --cell-nuclei-model
-  cli_order: 15
-  optional: true
-  section_id: essential
-  mode: beginner
-- name: cell_expansion_nucleus_model
-  type: dropdown
-  label: Step 1 Expansion Nucleus Model
-  description: Nucleus model applied to the Step 1 primary channel before fast label expansion.
-  options: [{label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}, {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}]
-  default: 'cellpose3:nuclei'
-  cli_tag: --cell-expansion-nucleus-model
-  cli_order: 16
-  optional: true
-  section_id: essential
-  mode: beginner
+- {name: cell_channel, type: integer, label: Step 1 Cyto Channel, description: One-based cell/cytoplasm channel for direct segmentation. Cell expansion uses this only when Step 1 Nucleus Channel is 0., default: 1, minimum: 1, cli_tag: --cell-channel, cli_order: 11, optional: true, section_id: essential, mode: beginner}
+- {name: cell_nuclei_channel, type: integer, label: Step 1 Nucleus Channel, description: One-based nucleus input supplied as the second channel to direct cell models and used as the nucleus seed channel for cell expansion. Use 0 to omit the second direct-model input or make expansion fall back to the Cyto Channel., default: 0, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
 - {name: cell_expansion_distance, type: float, label: Step 1 Expansion Distance (µm), description: Maximum XY distance in µm to expand each nucleus into a cell using a fast Euclidean nearest-label transform., default: 10.0, minimum: 0.0, cli_tag: --cell-expansion-distance, cli_order: 17, optional: true, section_id: essential, mode: beginner}
-- {name: nucleus_step, type: checkbox, label: "Step 2: Nuclei Detection", description: Enable independent nuclei detection. When cells and nuclei are both available they are matched, unmatched cells are removed and cytoplasm is always derived., default: false, cli_tag: --nucleus-step, cli_order: 20, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: nucleus_model
   type: dropdown
-  label: Step 2 Nucleus Model
-  description: Model used for independent nuclei detection.
-  options: [{label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}, {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}, {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}]
-  default: 'cellpose3:nuclei'
+  label: "Step 2: Nuclei Detection"
+  description: Skip Step 2 or select a model for independent nuclei detection and cell/nucleus matching.
+  options: [{label: Skip, value: skip}, {label: Cellpose 3 nuclei, value: 'cellpose3:nuclei'}, {label: Cellpose-SAM, value: 'cellpose-sam:cpsam'}, {label: StarDist nuclei versatile, value: 'stardist:SD_Nuclei_Versatile'}, {label: InstanSeg single-channel nuclei, value: 'instanseg:single_channel_nuclei'}, {label: InstanSeg fluorescence nuclei and cells, value: 'instanseg:fluorescence_nuclei_and_cells'}]
+  default: skip
   cli_tag: --nucleus-model
   cli_order: 21
   optional: true
   section_id: essential
   mode: beginner
 - {name: nucleus_channel, type: integer, label: Step 2 Nucleus Channel, description: One-based signal channel used for independent nuclei detection., default: 1, minimum: 1, cli_tag: --nucleus-channel, cli_order: 22, optional: true, section_id: essential, mode: beginner}
-- {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_step_1, type: checkbox, label: "Step 3a: Foci Detection", description: Enable the first independent foci/spot detection slot., default: false, cli_tag: --foci-step-1, cli_order: 30, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: foci_model_1
   type: dropdown
-  label: Step 3a Model
-  description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel.
-  options: &foci_model_options [{label: Spotiflow general, value: 'spotiflow:general'}, {label: Spotiflow HYBISS, value: 'spotiflow:hybiss'}, {label: Spotiflow synthetic complex, value: 'spotiflow:synth_complex'}, {label: Spotiflow synthetic 3D, value: 'spotiflow:synth_3d'}, {label: Spotiflow smFISH 3D, value: 'spotiflow:smfish_3d'}, {label: Spotiflow fluorescence live, value: 'spotiflow:fluo_live'}, {label: StarDist foci aggregates, value: 'stardist:SD_Foci_Aggregates'}, {label: StarDist foci Finn, value: 'stardist:SD_Foci_Finn'}, {label: Cellpose 3 bacteria phase, value: 'cellpose3:bact_phase_cp3'}, {label: Cellpose 3 bacteria fluorescence, value: 'cellpose3:bact_fluor_cp3'}]
-  default: 'spotiflow:general'
+  label: "Step 3a: Foci Detection"
+  description: Skip this slot or select a Spotiflow, StarDist SD_Foci, or Cellpose 3 bacteria model.
+  options: &foci_model_options [{label: Skip, value: skip}, {label: Spotiflow general, value: 'spotiflow:general'}, {label: Spotiflow HYBISS, value: 'spotiflow:hybiss'}, {label: Spotiflow synthetic complex, value: 'spotiflow:synth_complex'}, {label: Spotiflow synthetic 3D, value: 'spotiflow:synth_3d'}, {label: Spotiflow smFISH 3D, value: 'spotiflow:smfish_3d'}, {label: Spotiflow fluorescence live, value: 'spotiflow:fluo_live'}, {label: StarDist foci aggregates, value: 'stardist:SD_Foci_Aggregates'}, {label: StarDist foci Finn, value: 'stardist:SD_Foci_Finn'}, {label: Cellpose 3 bacteria phase, value: 'cellpose3:bact_phase_cp3'}, {label: Cellpose 3 bacteria fluorescence, value: 'cellpose3:bact_fluor_cp3'}]
+  default: skip
   cli_tag: --foci-model-1
   cli_order: 31
   optional: true
-  section_id: advanced
-  mode: advanced
-- {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 2, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
-- {name: foci_step_2, type: checkbox, label: "Step 3b: Foci Detection", description: Enable the second independent foci/spot detection slot., default: false, cli_tag: --foci-step-2, cli_order: 33, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_2, type: dropdown, label: Step 3b Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 2, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: essential, mode: beginner}
-- {name: foci_step_3, type: checkbox, label: "Step 3c: Foci Detection", description: Enable the third independent foci/spot detection slot., default: false, cli_tag: --foci-step-3, cli_order: 36, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_3, type: dropdown, label: Step 3c Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 2, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: essential, mode: beginner}
-- {name: foci_step_4, type: checkbox, label: "Step 3d: Foci Detection", description: Enable the fourth independent foci/spot detection slot., default: false, cli_tag: --foci-step-4, cli_order: 39, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: foci_model_4, type: dropdown, label: Step 3d Model, description: Spotiflow, StarDist SD_Foci, or Cellpose 3 bact model for this channel., options: *foci_model_options, default: 'spotiflow:general', cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 2, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: essential, mode: beginner}
-- {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: false, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: advanced, mode: advanced}
+  section_id: essential
+  mode: beginner
+- {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_2, type: dropdown, label: "Step 3b: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: essential, mode: beginner}
+- {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_3, type: dropdown, label: "Step 3c: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: essential, mode: beginner}
+- {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 1, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: essential, mode: beginner}
+- {name: foci_model_4, type: dropdown, label: "Step 3d: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: essential, mode: beginner}
+- {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 1, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: essential, mode: beginner}
+- {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
+- {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: false, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: device
   type: dropdown
   label: Compute Device
@@ -156,6 +117,7 @@ parameters:
   optional: true
   section_id: advanced
   mode: advanced
+- {name: write_ome_zarr_labels, type: checkbox, label: Write Native OME-Zarr Labels, description: Write the original image at the output root and each segmentation as an OME-Zarr 0.4 image-label under the labels group instead of appending label channels., default: false, cli_tag: --write-ome-zarr-labels, cli_order: 45, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - name: dimension_mode
   type: dropdown
   label: Dimension Mode

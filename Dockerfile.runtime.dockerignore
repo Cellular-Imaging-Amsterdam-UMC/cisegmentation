@@ -1,0 +1,5 @@
+**
+!Dockerfile.runtime
+!requirements.txt
+!tools/
+!tools/download_models.py

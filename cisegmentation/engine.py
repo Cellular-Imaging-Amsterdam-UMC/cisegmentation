@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 from dataclasses import replace
+from collections.abc import Callable
 
 import numpy as np
 
@@ -17,7 +18,16 @@ from .ome_zarr_io import (
     write_label_image,
 )
 from .registry import get_model_spec
-from .settings import SegmentationSettings
+from .reporting import (
+    emit,
+    format_label_statistics,
+    format_step_record,
+    input_report_lines,
+    label_statistics,
+    step_record,
+    workflow_report_lines,
+)
+from .settings import SKIP, SegmentationSettings
 
 
 def _aggregate_timings(records: list[dict[str, float]]) -> dict[str, float]:
@@ -191,12 +201,40 @@ def _spot_model_dispatch(model_id: str):
     )
 
 
+def _run_reported_segmentation(
+    czyx: np.ndarray,
+    spec,
+    settings: SegmentationSettings,
+    scales: dict[str, float],
+    *,
+    step: str,
+    timepoint: int,
+    log: Callable[[str], None] | None,
+) -> tuple[np.ndarray, dict, dict]:
+    labels, info = segment_czyx(czyx, spec, settings, scales)
+    record = step_record(
+        step=step,
+        timepoint=timepoint,
+        model=spec.id,
+        target=settings.target,
+        primary_channel=settings.primary_channel,
+        nuclei_channel=settings.nuclei_channel,
+        labels=labels,
+        info=info,
+        scales=scales,
+    )
+    for line in format_step_record(record):
+        emit(log, line)
+    return labels, info, record
+
+
 def _segment_multistep_image(
     image,
     settings: SegmentationSettings,
     *,
     startup_seconds: float = 0.0,
     zarr_read_seconds: float = 0.0,
+    log: Callable[[str], None] | None = None,
 ) -> LabelResult:
     settings.validate_steps()
     foci_steps = settings.enabled_foci_steps()
@@ -208,25 +246,33 @@ def _segment_multistep_image(
             )
     per_time: list[np.ndarray] = []
     infos: list[dict] = []
+    step_runs: list[dict] = []
+    output_statistics: list[dict] = []
     channel_labels: list[str] = []
     next_id = 0
     for time_index in range(image.data.shape[0]):
         czyx = image.data[time_index]
         cell_labels = nucleus_labels = cell_step_nuclei = None
-        if settings.cell_step:
-            if settings.cell_method == "cell-expansion":
+        if settings.cell_model != SKIP:
+            expansion_model = settings.cell_expansion_model()
+            if expansion_model is not None:
                 expansion_settings = _step_settings(
                     settings,
-                    model=settings.cell_expansion_nucleus_model,
+                    model=expansion_model,
                     target="nuclei",
-                    primary_channel=settings.cell_channel,
+                    primary_channel=settings.cell_expansion_channel(),
                 )
-                cell_step_nuclei, info = segment_czyx(
+                cell_step_nuclei, info, record = _run_reported_segmentation(
                     czyx,
-                    get_model_spec(settings.cell_expansion_nucleus_model),
+                    get_model_spec(expansion_model),
                     expansion_settings,
                     image.scales,
+                    step="Step 1 expansion nuclei",
+                    timepoint=time_index,
+                    log=log,
                 )
+                infos.append(info)
+                step_runs.append(record)
                 cell_labels = _expand_nuclei_to_cells(
                     cell_step_nuclei,
                     settings.cell_expansion_distance,
@@ -240,41 +286,35 @@ def _segment_multistep_image(
                     primary_channel=settings.cell_channel,
                     nuclei_channel=settings.cell_nuclei_channel,
                 )
-                cell_labels, info = segment_czyx(
+                cell_labels, info, record = _run_reported_segmentation(
                     czyx,
                     get_model_spec(settings.cell_model),
                     cell_settings,
                     image.scales,
+                    step="Step 1 cells",
+                    timepoint=time_index,
+                    log=log,
                 )
-                if settings.cell_nuclei_channel > 0 and not settings.nucleus_step:
-                    step1_nucleus_settings = _step_settings(
-                        settings,
-                        model=settings.cell_nuclei_model,
-                        target="nuclei",
-                        primary_channel=settings.cell_nuclei_channel,
-                    )
-                    cell_step_nuclei, nucleus_info = segment_czyx(
-                        czyx,
-                        get_model_spec(settings.cell_nuclei_model),
-                        step1_nucleus_settings,
-                        image.scales,
-                    )
-                    infos.append(nucleus_info)
-            infos.append(info)
-        if settings.nucleus_step:
+                infos.append(info)
+                step_runs.append(record)
+        if settings.nucleus_model != SKIP:
             nucleus_settings = _step_settings(
                 settings,
                 model=settings.nucleus_model,
                 target="nuclei",
                 primary_channel=settings.nucleus_channel,
             )
-            nucleus_labels, info = segment_czyx(
+            nucleus_labels, info, record = _run_reported_segmentation(
                 czyx,
                 get_model_spec(settings.nucleus_model),
                 nucleus_settings,
                 image.scales,
+                step="Step 2 nuclei",
+                timepoint=time_index,
+                log=log,
             )
             infos.append(info)
+            step_runs.append(record)
 
         time_channels: list[np.ndarray] = []
         time_channel_labels: list[str] = []
@@ -289,7 +329,9 @@ def _segment_multistep_image(
                 remove_border_cells=settings.remove_border_cells,
             )
             time_channels.extend((cells, nuclei, cytoplasm))
-            time_channel_labels.extend(("cells", "nuclei", "cytoplasm"))
+            time_channel_labels.extend(
+                ("labels_cells", "labels_nuclei", "labels_cytoplasm")
+            )
         elif cell_labels is not None:
             if settings.remove_border_cells:
                 touching = _border_ids(cell_labels)
@@ -299,11 +341,11 @@ def _segment_multistep_image(
                     )
             cell_labels, next_id = _offset_labels(cell_labels, next_id)
             time_channels.append(cell_labels)
-            time_channel_labels.append("cells")
+            time_channel_labels.append("labels_cells")
         elif nucleus_labels is not None:
             nucleus_labels, next_id = _offset_labels(nucleus_labels, next_id)
             time_channels.append(nucleus_labels)
-            time_channel_labels.append("nuclei")
+            time_channel_labels.append("labels_nuclei")
 
         for slot, model_id, channel in foci_steps:
             spot_spec, spot_target, spot_label = _spot_model_dispatch(model_id)
@@ -315,17 +357,40 @@ def _segment_multistep_image(
             )
             if spot_label == "bacteria" and settings.diameter == 0:
                 spot_settings = replace(spot_settings, diameter=-1.0)
-            spots, info = segment_czyx(
-                czyx, spot_spec, spot_settings, image.scales
+            spots, info, record = _run_reported_segmentation(
+                czyx,
+                spot_spec,
+                spot_settings,
+                image.scales,
+                step=f"Step 3{chr(96 + slot)} {spot_label}",
+                timepoint=time_index,
+                log=log,
             )
             infos.append(info)
+            step_runs.append(record)
             spots, next_id = _offset_labels(spots, next_id)
             time_channels.append(spots)
-            time_channel_labels.append(
-                f"{spot_label} channel {channel} (3{chr(96 + slot)})"
-            )
+            time_channel_labels.append(f"labels_{spot_label}_channel_{channel}")
         if not time_channels:
             raise ValueError("Multi-step mode produced no output channels")
+        emit(log, f"  Post-processing | T{time_index + 1}")
+        for name, labels in zip(time_channel_labels, time_channels):
+            statistics = label_statistics(labels, image.scales)
+            output_statistics.append(
+                {
+                    "timepoint": time_index,
+                    "channel": name,
+                    "label_statistics": statistics,
+                }
+            )
+            emit(
+                log,
+                f"    {name}: "
+                + format_label_statistics(
+                    statistics,
+                    locations_only=name.startswith("labels_spots_channel_"),
+                ),
+            )
         if not channel_labels:
             channel_labels = time_channel_labels
         per_time.append(np.stack(time_channels, axis=0))
@@ -356,18 +421,20 @@ def _segment_multistep_image(
                 not bool(info.get("model_cache_hit")) for info in infos
             ),
             "timings": timings,
+            "step_runs": step_runs,
+            "output_statistics": output_statistics,
             "parameters": settings.to_dict(),
             "shared_instance_ids": ["cells", "nuclei", "cytoplasm"]
-            if settings.cell_step
+            if settings.cell_model != SKIP
             and (
-                settings.nucleus_step
-                or settings.cell_method == "cell-expansion"
-                or settings.cell_nuclei_channel > 0
+                settings.nucleus_model != SKIP
+                or settings.cell_expansion_model() is not None
             )
             else [],
         },
         channel_labels=channel_labels,
         include_original_channels=settings.include_original_channels,
+        write_ome_zarr_labels=settings.write_ome_zarr_labels,
     )
 def _segment_image(
     image,
@@ -422,6 +489,7 @@ def _segment_image(
             "timings": timings,
             "parameters": settings.to_dict(),
         },
+        write_ome_zarr_labels=settings.write_ome_zarr_labels,
     )
 
 
@@ -431,20 +499,26 @@ def run_workflow(
     settings: SegmentationSettings,
     *,
     startup_seconds: float = 0.0,
+    log: Callable[[str], None] | None = None,
 ) -> list[Path]:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     settings.validate_steps()
+    for line in workflow_report_lines(settings):
+        emit(log, line)
     stores = discover_ome_zarrs(input_dir)
     if not stores:
         raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")
     outputs: list[Path] = []
+    emit(log, f"Discovered {len(stores)} top-level OME-Zarr input(s).")
     startup_remaining = float(startup_seconds)
     if settings.benchmark:
         first_resource = enumerate_resources(stores[0])[0]
         read_started = time.perf_counter()
         image = read_image(first_resource)
         read_seconds = time.perf_counter() - read_started
+        for line in input_report_lines(image, read_seconds):
+            emit(log, line)
         gallery, failed = run_benchmark(
             image,
             settings,
@@ -453,6 +527,7 @@ def run_workflow(
                 "startup_seconds": startup_remaining,
                 "zarr_read_seconds": read_seconds,
             },
+            log=log,
         )
         if failed:
             raise RuntimeError(
@@ -467,12 +542,15 @@ def run_workflow(
             read_started = time.perf_counter()
             image = read_image(resource)
             read_seconds = time.perf_counter() - read_started
+            for line in input_report_lines(image, read_seconds):
+                emit(log, line)
             results.append(
                 _segment_multistep_image(
                     image,
                     settings,
                     startup_seconds=startup_remaining,
                     zarr_read_seconds=read_seconds,
+                    log=log,
                 )
             )
             startup_remaining = 0.0
@@ -484,8 +562,11 @@ def run_workflow(
             )
         )
         if resources[0].plate_path is None:
+            emit(log, f"Writing output: {output_path}")
             write_label_image(results[0], output_path)
         else:
+            emit(log, f"Writing HCS output: {output_path}")
             write_hcs_plate(results, output_path)
+        emit(log, f"Finished output: {output_path}")
         outputs.append(output_path)
     return outputs

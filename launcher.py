@@ -32,7 +32,6 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -201,6 +200,27 @@ class MultiSelectList(QListWidget):
             for index in range(self.count())
             if self.item(index).checkState() == Qt.CheckState.Checked
         ]
+
+
+class NoWheelComboBox(QComboBox):
+    """A selector that never changes its value while the form is scrolled."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        event.ignore()
+
+
+class NoWheelSpinBox(QSpinBox):
+    """An integer editor that ignores mouse-wheel value changes."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        event.ignore()
+
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    """A floating-point editor that ignores mouse-wheel value changes."""
+
+    def wheelEvent(self, event) -> None:  # noqa: N802 - Qt API name
+        event.ignore()
 
 
 class CollapsiblePanel(QWidget):
@@ -433,20 +453,20 @@ class Window(QMainWindow):
             widget.setChecked(bool(spec.get("default")))
             return widget
         if spec.get("options"):
-            widget = QComboBox()
+            widget = NoWheelComboBox()
             for option in spec["options"]:
                 widget.addItem(str(option["label"]), option["value"])
             widget.setCurrentIndex(max(widget.findData(spec.get("default")), 0))
             return widget
         if spec.get("type") == "integer":
-            widget = QSpinBox()
+            widget = NoWheelSpinBox()
             widget.setRange(
                 int(spec.get("minimum", -999999)), int(spec.get("maximum", 999999))
             )
             widget.setValue(int(spec.get("default", 0)))
             return widget
         if spec.get("type") == "float":
-            widget = QDoubleSpinBox()
+            widget = NoWheelDoubleSpinBox()
             widget.setDecimals(6)
             widget.setRange(
                 float(spec.get("minimum", -999999)),
@@ -517,7 +537,6 @@ class Window(QMainWindow):
         return self.docker_command()
 
     def refresh(self) -> None:
-        self._update_parameter_state()
         self.preview.setPlainText(
             "Docker:\n"
             + subprocess.list2cmdline(self.docker_command())
@@ -527,90 +546,21 @@ class Window(QMainWindow):
             + subprocess.list2cmdline(self.roundtrip_command())
         )
 
-    def _update_parameter_state(self) -> None:
-        groups = {
-            "nucleus_step": ("nucleus_model", "nucleus_channel"),
-            "foci_step_1": ("foci_model_1", "foci_channel_1"),
-            "foci_step_2": ("foci_model_2", "foci_channel_2"),
-            "foci_step_3": ("foci_model_3", "foci_channel_3"),
-            "foci_step_4": ("foci_model_4", "foci_channel_4"),
-        }
-        for toggle_name, dependent_names in groups.items():
-            toggle = self.widgets.get(toggle_name)
-            enabled = isinstance(toggle, QCheckBox) and toggle.isChecked()
-            for name in dependent_names:
-                if name in self.widgets:
-                    self.widgets[name].setEnabled(enabled)
-
-        cell_toggle = self.widgets.get("cell_step")
-        cell_enabled = isinstance(cell_toggle, QCheckBox) and cell_toggle.isChecked()
-        method = self.widgets.get("cell_method")
-        expansion = (
-            cell_enabled
-            and isinstance(method, QComboBox)
-            and method.currentData() == "cell-expansion"
-        )
-        for name in ("cell_method", "cell_channel"):
-            if name in self.widgets:
-                self.widgets[name].setEnabled(cell_enabled)
-        for name in ("cell_model", "cell_nuclei_channel"):
-            if name in self.widgets:
-                self.widgets[name].setEnabled(cell_enabled and not expansion)
-        nuclei_channel = self.widgets.get("cell_nuclei_channel")
-        if "cell_nuclei_model" in self.widgets:
-            self.widgets["cell_nuclei_model"].setEnabled(
-                cell_enabled
-                and not expansion
-                and isinstance(nuclei_channel, QSpinBox)
-                and nuclei_channel.value() > 0
-            )
-        for name in ("cell_expansion_nucleus_model", "cell_expansion_distance"):
-            if name in self.widgets:
-                self.widgets[name].setEnabled(expansion)
-
     def run_docker(self) -> None:
-        if not self._validate_run_selection():
-            return
         self.save()
         subprocess.Popen(self.docker_command(), cwd=ROOT)
 
     def run_local(self) -> None:
-        if not self._validate_run_selection():
-            return
         self.save()
         subprocess.Popen(self.local_command(), cwd=ROOT)
 
     def run_roundtrip(self) -> None:
-        if not self._validate_run_selection():
-            return
         self.save()
         for button in self.run_buttons:
             button.setEnabled(False)
         self.roundtrip_dialog = RoundtripDialog(self.roundtrip_command(), self)
         self.roundtrip_dialog.roundtripFinished.connect(self._roundtrip_finished)
         self.roundtrip_dialog.show()
-
-    def _validate_run_selection(self) -> bool:
-        values = self.values()
-        if any(
-            values.get(name)
-            for name in (
-                "cell_step",
-                "nucleus_step",
-                "foci_step_1",
-                "foci_step_2",
-                "foci_step_3",
-                "foci_step_4",
-            )
-        ):
-            return True
-        QMessageBox.warning(
-            self,
-            "No segmentation step selected",
-            "Select Cell Detection, Nuclei Detection, or at least one Foci "
-            "Detection slot before running.",
-        )
-        return False
 
     def _roundtrip_finished(self, _result: int) -> None:
         for button in self.run_buttons:
@@ -637,7 +587,10 @@ class Window(QMainWindow):
         self.input_path.setText(data.get("input", ""))
         self.output_path.setText(data.get("output", ""))
         self.gpu.setChecked(data.get("gpu", True))
-        for name, value in data.get("values", {}).items():
+        from cisegmentation.settings import normalize_legacy_workflow_values
+
+        restored_values = normalize_legacy_workflow_values(data.get("values", {}))
+        for name, value in restored_values.items():
             widget = self.widgets.get(name)
             if isinstance(widget, QComboBox):
                 widget.setCurrentIndex(max(0, widget.findData(value)))

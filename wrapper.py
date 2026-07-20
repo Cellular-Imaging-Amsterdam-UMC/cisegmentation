@@ -8,7 +8,7 @@ import time
 PROCESS_STARTED = time.perf_counter()
 
 from cisegmentation.engine import run_workflow
-from cisegmentation.settings import SegmentationSettings
+from cisegmentation.settings import SegmentationSettings, normalize_legacy_workflow_values
 
 
 _TIMING_LABELS = (
@@ -83,6 +83,25 @@ def build_parser() -> argparse.ArgumentParser:
             nargs="?" if kind is _bool else None,
             const=True if kind is _bool else None,
         )
+    legacy_types = {
+        "cell_step": _bool,
+        "cell_method": str,
+        "cell_nuclei_model": str,
+        "cell_expansion_nucleus_model": str,
+        "nucleus_step": _bool,
+        **{f"foci_step_{slot}": _bool for slot in range(1, 5)},
+    }
+    for name, kind in legacy_types.items():
+        parser.add_argument(
+            "--" + name.replace("_", "-"),
+            "--" + name,
+            dest=name,
+            type=kind,
+            default=argparse.SUPPRESS,
+            nargs="?" if kind is _bool else None,
+            const=True if kind is _bool else None,
+            help=argparse.SUPPRESS,
+        )
     return parser
 
 
@@ -95,14 +114,25 @@ def main(argv: list[str] | None = None) -> int:
     for name in SegmentationSettings.__dataclass_fields__:
         if hasattr(args, name):
             values[name] = getattr(args, name)
-    settings = SegmentationSettings(**values)
-    print(f"CI segmentation: optional steps, benchmark={settings.benchmark}")
+    for name in (
+        "cell_step",
+        "cell_method",
+        "cell_nuclei_model",
+        "cell_expansion_nucleus_model",
+        "nucleus_step",
+        *(f"foci_step_{slot}" for slot in range(1, 5)),
+    ):
+        if hasattr(args, name):
+            values[name] = getattr(args, name)
+    settings = SegmentationSettings(**normalize_legacy_workflow_values(values))
+    print(f"CI segmentation: optional steps, benchmark={settings.benchmark}", flush=True)
     try:
         outputs = run_workflow(
             args.input_dir,
             args.output_dir,
             settings,
             startup_seconds=time.perf_counter() - PROCESS_STARTED,
+            log=lambda line: print(line, flush=True),
         )
     except Exception as exc:
         print(f"CI segmentation failed: {type(exc).__name__}: {exc}", file=sys.stderr)

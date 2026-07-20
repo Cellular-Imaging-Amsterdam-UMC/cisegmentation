@@ -35,19 +35,27 @@ mode uses the active Python environment and executes `wrapper.py` directly.
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
 
+During execution, the job log reports the selected workflow and tuning values,
+input T/C/Z/Y/X dimensions, datatype, physical scales, and channel names. Every
+model call reports its resolved CPU/GPU device, dimensional mode, runtime and
+timing breakdown, model-cache status, label count, foreground fraction, and
+label-size distribution. Post-processing statistics show the final output of
+cell/nucleus matching and border removal. Structured per-step and final
+statistics are also stored in the output provenance.
+
 For a direct local run after activating the environment:
 
 ```powershell
 python wrapper.py --infolder inputfolder --outfolder outputfolder `
-  --cell-step true --cell-model cellpose3:cyto3 `
-  --cell-channel 3 --cell-nuclei-channel 1 --device cuda
+  --cell-model cellpose3:cyto3 `
+  --cell-channel 1 --cell-nuclei-channel 0 --device cuda
 ```
 
 Benchmark example:
 
 ```powershell
 python wrapper.py --infolder inputfolder --outfolder outputfolder `
-  --cell-step false --nucleus-step true --nucleus-channel 1 `
+  --cell-model skip --nucleus-model cellpose3:nuclei --nucleus-channel 1 `
   --benchmark true --device cuda
 ```
 
@@ -67,13 +75,48 @@ converted internally using the OME-Zarr XY scale metadata.
 
 | Parameter | Use |
 | --- | --- |
-| Step 1: Cell Detection (`--cell-step`) | The only detection step enabled by default. It can use deep-learning cell segmentation or nucleus-seeded cell expansion. |
-| Step 1 Method (`--cell-method`) | `deep-learning` uses the selected cell model. `cell-expansion` first segments nuclei from the Step 1 primary channel, then expands each nucleus to its nearest-label territory. |
-| Step 1 Cell Model / Primary Channel / Optional Nuclei Channel / Nucleus Model | Selects the deep-learning cell model and one-based cell/cytoplasm signal channel. When the optional nuclei channel is greater than zero, it is both supplied to the cell model and segmented with the Step 1 nucleus model; cells without a matched nucleus are removed and cell, nucleus, and cytoplasm channels are written with shared IDs. `0` produces cell labels only. |
-| Step 1 Expansion Nucleus Model / Distance | Selects the nucleus seed model and maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
-| Step 2: Nuclei Detection / Model / Channel | Optionally segments nuclei independently. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained and cells without nuclei are removed. Cytoplasm is then always written as cell minus nucleus, with corresponding gray-value IDs. |
-| Step 3a–3d: Foci Detection / Model / Channel | Up to four independent one-based channels, each with its own Spotiflow, `SD_Foci_*` StarDist, or Cellpose 3 `bact` model. Repeating a channel is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
-| Include Original Data Channels (`--include-original-channels`) | Advanced option. Prepends all source channels before the label channels. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
+| Step 1: Cell Detection (`--cell-model`) / Cyto Channel / Nucleus Channel | Selects `Skip`, a direct cell model, or `Cell expansion using …`. Direct models receive the Cyto Channel and, when the optional nucleus channel is greater than zero and different, that channel as a second input. Expansion uses the Step 1 Nucleus Channel as its seed signal when greater than zero, otherwise it falls back to the Cyto Channel. This input does not independently create matched nucleus labels; select Step 2 for that. |
+| Step 1 Expansion Distance | Sets the maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
+| Step 2: Nuclei Detection (`--nucleus-model`) / Channel | Selects `Skip` or an independent nucleus model. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained, cells without nuclei are removed, and cytoplasm is written with shared IDs. Step 2 may repeat the nucleus model used for Step 1 expansion. |
+| Step 3a–3d: Foci Detection (`--foci-model-1` … `--foci-model-4`) / Channel | Each beginner selector offers `Skip`, Spotiflow, `SD_Foci_*` StarDist, and Cellpose 3 `bact` models. Repeating models or channels is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
+| Include Original Data Channels (`--include-original-channels`) | Final beginner option. Prepends all source channels before the label channels. Generated label names use the collision-safe `labels_<name>` form with underscores only. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
+| Write Native OME-Zarr Labels (`--write-ome-zarr-labels`) | Advanced option. Keeps the original image and datatype at the output root and writes every segmentation separately under `labels/` using the OME-Zarr 0.4 `labels` and `image-label` metadata. Duplicate output names receive a numeric suffix. This replaces the extra-label-channel layout; the Include Original Data Channels setting is therefore unnecessary in this mode. |
+
+## Maintainer publication tools
+
+The repository includes two Windows maintainer scripts. They contain no
+credentials: Docker authentication is read from Docker's credential store and
+GitHub authentication is handled by `gh auth`.
+
+Inspect Docker tags and push commands without changing the registry:
+
+```bat
+pushdocker.cmd --skip-build --dry-run
+```
+
+Build and publish the version from `version.txt` only after reviewing the dry
+run:
+
+```bat
+pushdocker.cmd --yes
+```
+
+Validate a GitHub release without creating a tag or release:
+
+```bat
+release_github.cmd --dry-run
+```
+
+Create the release after reviewing the dry run:
+
+```bat
+release_github.cmd --yes
+```
+
+Publication requires a strict semantic version. Docker publishing is locked to
+`cellularimagingcf/w_cisegmentation`; GitHub publishing is locked to the
+`Cellular-Imaging-Amsterdam-UMC/cisegmentation` origin. The GitHub release tool
+also requires a clean branch that is synchronized with its upstream.
 | Remove Border Cells (`--remove-border-cells`) | Advanced option, enabled by default. Removes cells touching an XY image edge and propagates removal to matched nuclei and derived cytoplasm. Z-stack endpoints are not treated as image borders. |
 | Compute Device (`--device`) | `auto` selects CUDA when available; `cuda` requires a GPU; `cpu` forces CPU inference. |
 | Dimension Mode (`--dimension-mode`) | `auto` uses native 3D where supported; `slice-2d` independently segments and relabels every Z plane. |

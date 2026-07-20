@@ -250,6 +250,31 @@ def _segment_cellpose(
         "cellprob_threshold": settings.cellprob_threshold,
         "channel_axis": -1,
     }
+    diameter_pixels = kwargs["diameter"]
+    diameter_source = "configured"
+    if settings.diameter == 0:
+        diameter_source = "automatic target default"
+    elif settings.diameter < 0:
+        diameter_source = "model default"
+        model_diameter = getattr(model, "diam_mean", None)
+        if hasattr(model_diameter, "item"):
+            model_diameter = model_diameter.item()
+        diameter_pixels = float(model_diameter) if model_diameter is not None else None
+    y_um = float(scales.get("y", float("nan")))
+    x_um = float(scales.get("x", float("nan")))
+    physical_scale_known = (
+        np.isfinite(y_um) and y_um > 0 and np.isfinite(x_um) and x_um > 0
+    )
+    effective = {
+        "adapter": "cellpose",
+        "diameter_source": diameter_source,
+        "diameter_pixels": diameter_pixels,
+        "diameter_um": float(diameter_pixels * (y_um + x_um) / 2.0)
+        if diameter_pixels is not None and physical_scale_known
+        else None,
+        "cellprob_threshold": float(settings.cellprob_threshold),
+        "flow_threshold": float(settings.flow_threshold),
+    }
     native_3d = (
         image.shape[0] > 1
         and spec.dimensions == "3d"
@@ -260,6 +285,7 @@ def _segment_cellpose(
         labels = np.asarray(masks, dtype=np.uint32)
         return labels, {
             **timing,
+            "effective_parameters": effective,
             "inference_seconds": time.perf_counter() - inference_started,
         }
     planes = []
@@ -269,6 +295,7 @@ def _segment_cellpose(
     labels = _unique_plane_labels(planes)
     return labels, {
         **timing,
+        "effective_parameters": effective,
         "inference_seconds": time.perf_counter() - inference_started,
     }
 
@@ -333,17 +360,40 @@ def _segment_stardist(
     nms = (
         None if settings.stardist_nms_threshold < 0 else settings.stardist_nms_threshold
     )
+    model_thresholds = getattr(model, "thresholds", {})
+    effective_prob = float(model_thresholds.get("prob", 0.5) if prob is None else prob)
+    effective_nms = float(model_thresholds.get("nms", 0.4) if nms is None else nms)
+    source_shape = tuple(czyx[channel, 0].shape)
+    model_shape = source_shape
     planes = []
     for z_index in range(czyx.shape[1]):
         plane = czyx[channel, z_index]
         original_shape = tuple(plane.shape)
         if spec.checkpoint == "SD_Nuclei_Versatile":
             plane, original_shape = _stardist_versatile_input(plane, scales)
+            model_shape = tuple(plane.shape)
         labels = _predict_stardist_tiled(model, plane, prob, nms)
         planes.append(_resize_2d(labels, original_shape, labels=True))
     labels = _unique_plane_labels(planes)
+    y_factor = model_shape[0] / source_shape[0]
+    x_factor = model_shape[1] / source_shape[1]
+    effective = {
+        "adapter": "stardist",
+        "probability_threshold": effective_prob,
+        "probability_source": "thresholds.json" if prob is None else "configured",
+        "nms_threshold": effective_nms,
+        "nms_source": "thresholds.json" if nms is None else "configured",
+        "source_yx_shape": list(source_shape),
+        "model_yx_shape": list(model_shape),
+        "rescale_y_factor": float(y_factor),
+        "rescale_x_factor": float(x_factor),
+        "model_y_um": float(scales["y"]) / y_factor if "y" in scales else None,
+        "model_x_um": float(scales["x"]) / x_factor if "x" in scales else None,
+        "labels_restored_to_source_grid": model_shape != source_shape,
+    }
     return labels, {
         **timing,
+        "effective_parameters": effective,
         "inference_seconds": time.perf_counter() - inference_started,
     }
 
@@ -406,6 +456,10 @@ def _segment_instanseg(
     labels = _unique_plane_labels(planes)
     return labels, {
         **timing,
+        "effective_parameters": {
+            "adapter": "instanseg",
+            "pixel_size_um": float(pixel_size_um),
+        },
         "inference_seconds": time.perf_counter() - inference_started,
     }
 
@@ -441,6 +495,20 @@ def _segment_spotiflow(
     min_distance = _spotiflow_min_distance_pixels(
         settings.spotiflow_min_distance, scales
     )
+    model_threshold = getattr(model, "_prob_thresh", [0.5])
+    if isinstance(model_threshold, (list, tuple, np.ndarray)):
+        model_threshold = model_threshold[0]
+    effective_threshold = float(model_threshold if threshold is None else threshold)
+    y_um, x_um = _xy_pixel_sizes_um(scales, "Spotiflow minimum distance reporting")
+    effective = {
+        "adapter": "spotiflow",
+        "probability_threshold": effective_threshold,
+        "probability_source": "checkpoint thresholds.yaml"
+        if threshold is None
+        else "configured",
+        "minimum_distance_pixels": int(min_distance),
+        "minimum_distance_um": float(min_distance * (y_um + x_um) / 2.0),
+    }
     native_3d = (
         volume.shape[0] > 1
         and spec.dimensions == "3d"
@@ -457,6 +525,7 @@ def _segment_spotiflow(
         labels = points_to_labels(points, volume.shape)
         return labels, {
             **timing,
+            "effective_parameters": effective,
             "inference_seconds": time.perf_counter() - inference_started,
         }
     labels = _unique_plane_labels(
@@ -476,6 +545,7 @@ def _segment_spotiflow(
     )
     return labels, {
         **timing,
+        "effective_parameters": effective,
         "inference_seconds": time.perf_counter() - inference_started,
     }
 
@@ -495,6 +565,12 @@ def segment_czyx(
     torch_was_loaded = "torch" in sys.modules
     device_started = time.perf_counter()
     device = resolve_device(settings.device)
+    torch = sys.modules.get("torch")
+    device_name = (
+        torch.cuda.get_device_name(torch.cuda.current_device())
+        if device == "cuda" and torch is not None
+        else "CPU"
+    )
     device_seconds = time.perf_counter() - device_started
     device_import_seconds = (
         device_seconds if not torch_was_loaded and "torch" in sys.modules else 0.0
@@ -517,6 +593,7 @@ def segment_czyx(
     else:
         raise ValueError(f"No adapter for model family {spec.family}")
     elapsed = time.perf_counter() - start
+    effective_parameters = timing.pop("effective_parameters", {})
     timing = {
         **timing,
         "import_seconds": float(timing.get("import_seconds", 0.0))
@@ -525,6 +602,7 @@ def segment_czyx(
     }
     return np.asarray(labels, dtype=np.uint32), {
         "device": device,
+        "device_name": device_name,
         "runtime_seconds": elapsed,
         "object_count": int(np.max(labels, initial=0)),
         "dimension_mode": "native-3d"
@@ -533,5 +611,6 @@ def segment_czyx(
         and settings.dimension_mode != "slice-2d"
         else "slice-2d",
         "model_cache_hit": bool(timing.get("model_cache_hit")),
+        "effective_parameters": effective_parameters,
         "timings": timing,
     }

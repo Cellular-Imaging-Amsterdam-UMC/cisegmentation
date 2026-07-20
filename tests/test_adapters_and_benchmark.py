@@ -52,18 +52,25 @@ def test_process_model_cache_is_keyed_by_model_and_device():
     clear_model_cache()
 
 
-def test_torch_runtime_suppresses_only_irrelevant_triton_warning(capsys):
+def test_torch_runtime_suppresses_only_irrelevant_triton_warning():
     import logging
 
     torch = _configure_torch_runtime()
     assert not torch.sparse.check_sparse_tensor_invariants.is_enabled()
 
     logger = logging.getLogger("torch.utils.flop_counter")
-    logger.warning("triton not found; flop counting will not work for triton kernels")
-    logger.warning("a different PyTorch warning")
-    captured = capsys.readouterr()
-    assert "triton not found" not in captured.err
-    assert "a different PyTorch warning" in captured.err
+    records = []
+    handler = logging.Handler()
+    handler.emit = records.append
+    logger.addHandler(handler)
+    try:
+        logger.warning("triton not found; flop counting will not work for triton kernels")
+        logger.warning("a different PyTorch warning")
+    finally:
+        logger.removeHandler(handler)
+    messages = [record.getMessage() for record in records]
+    assert not any("triton not found" in message for message in messages)
+    assert "a different PyTorch warning" in messages
 
 
 def test_spotiflow_points_are_unique_single_pixels():
@@ -127,8 +134,8 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
     )
     settings = SegmentationSettings(
         benchmark=True,
-        cell_step=False,
-        nucleus_step=True,
+        cell_model="skip",
+        nucleus_model="cellpose3:nuclei",
         nucleus_channel=1,
     )
     output, failed = run_benchmark(image, settings, outputfolder)
@@ -151,19 +158,14 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
 
 def test_benchmark_uses_every_model_offered_for_enabled_steps():
     settings = SegmentationSettings(
-        cell_step=True,
-        cell_method="deep-learning",
         cell_channel=3,
-        cell_nuclei_channel=1,
-        nucleus_step=False,
-        foci_step_2=True,
+        foci_model_2="spotiflow:general",
         foci_channel_2=2,
     )
     cases = _benchmark_cases(settings)
-    assert len(cases) == 3 + 4 + 10
+    assert len(cases) == 3 + 10
     assert {case.step for case in cases} == {
         "Step 1 cells",
-        "Step 1 nuclei",
         "Step 3b foci",
     }
     foci = [case for case in cases if case.step == "Step 3b foci"]
@@ -177,8 +179,13 @@ def test_benchmark_uses_every_model_offered_for_enabled_steps():
 
 def test_expansion_benchmark_uses_all_selectable_seed_models():
     cases = _benchmark_cases(
-        SegmentationSettings(cell_method="cell-expansion", cell_channel=1)
+        SegmentationSettings(
+            cell_model="expand:cellpose3:nuclei",
+            cell_channel=3,
+            cell_nuclei_channel=1,
+        )
     )
     assert len(cases) == 4
     assert {case.step for case in cases} == {"Step 1 expansion nuclei"}
     assert {case.target for case in cases} == {"nuclei"}
+    assert {case.primary_channel for case in cases} == {1}

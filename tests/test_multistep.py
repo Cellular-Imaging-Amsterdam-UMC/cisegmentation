@@ -76,30 +76,37 @@ def test_multistep_produces_compartment_and_independent_foci_channels(monkeypatc
         }
 
     monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    log = []
     result = engine._segment_multistep_image(
         image,
         SegmentationSettings(
-            nucleus_step=True,
-            foci_step_1=True,
+            nucleus_model="cellpose3:nuclei",
+            foci_model_1="spotiflow:general",
             foci_channel_1=2,
-            foci_step_2=True,
+            foci_model_2="spotiflow:general",
             foci_channel_2=2,
         ),
         startup_seconds=0.4,
         zarr_read_seconds=0.6,
+        log=log.append,
     )
 
     assert result.labels.shape == (1, 5, 1, 5, 5)
     assert result.channel_labels == [
-        "cells",
-        "nuclei",
-        "cytoplasm",
-        "spots channel 2 (3a)",
-        "spots channel 2 (3b)",
+        "labels_cells",
+        "labels_nuclei",
+        "labels_cytoplasm",
+        "labels_spots_channel_2",
+        "labels_spots_channel_2",
     ]
-    assert calls == [("cells", 3), ("nuclei", 1), ("spots", 2), ("spots", 2)]
+    assert calls == [("cells", 1), ("nuclei", 1), ("spots", 2), ("spots", 2)]
     assert result.provenance["timings"]["inference_seconds"] == 1.2
     assert result.provenance["timings"]["startup_seconds"] == 0.4
+    assert len(result.provenance["step_runs"]) == 4
+    assert len(result.provenance["output_statistics"]) == 5
+    assert any("device=CPU" in line for line in log)
+    assert any("labels=" in line for line in log)
+    assert any("Post-processing" in line for line in log)
 
 
 @pytest.mark.parametrize(
@@ -146,9 +153,8 @@ def test_bacterial_foci_step_uses_supported_target_and_model_diameter(monkeypatc
     result = engine._segment_multistep_image(
         image,
         SegmentationSettings(
-            cell_step=False,
-            nucleus_step=False,
-            foci_step_1=True,
+            cell_model="skip",
+            nucleus_model="skip",
             foci_model_1="cellpose3:bact_phase_cp3",
             foci_channel_1=1,
             diameter=0,
@@ -156,7 +162,7 @@ def test_bacterial_foci_step_uses_supported_target_and_model_diameter(monkeypatc
     )
 
     assert observed == {"target": "cells", "diameter": -1.0}
-    assert result.channel_labels == ["bacteria channel 1 (3a)"]
+    assert result.channel_labels == ["labels_bacteria_channel_1"]
 
 
 def test_fast_cell_expansion_uses_physical_xy_distance():
@@ -169,7 +175,7 @@ def test_fast_cell_expansion_uses_physical_xy_distance():
     assert cells[0, 0, 3] == 0  # two Y pixels are 2 µm
 
 
-def test_step1_optional_nuclei_channel_creates_consistent_compartments(monkeypatch):
+def test_step2_nuclei_create_consistent_compartments(monkeypatch):
     image = SimpleNamespace(
         data=np.zeros((1, 3, 1, 5, 5), dtype=np.uint8),
         scales={"x": 0.5, "y": 0.5},
@@ -191,10 +197,16 @@ def test_step1_optional_nuclei_channel_creates_consistent_compartments(monkeypat
         }
 
     monkeypatch.setattr(engine, "segment_czyx", fake_segment)
-    result = engine._segment_multistep_image(image, SegmentationSettings())
-    assert result.channel_labels == ["cells", "nuclei", "cytoplasm"]
+    result = engine._segment_multistep_image(
+        image, SegmentationSettings(nucleus_model="cellpose3:nuclei")
+    )
+    assert result.channel_labels == [
+        "labels_cells",
+        "labels_nuclei",
+        "labels_cytoplasm",
+    ]
     assert calls == [
-        ("cells", 3, "cellpose3:cyto3"),
+        ("cells", 1, "cellpose3:cyto3"),
         ("nuclei", 1, "cellpose3:nuclei"),
     ]
     assert set(np.unique(result.labels[:, 0])) == {0, 1}
@@ -203,4 +215,79 @@ def test_step1_optional_nuclei_channel_creates_consistent_compartments(monkeypat
 
 def test_no_enabled_steps_is_rejected():
     with pytest.raises(ValueError, match="Select at least one segmentation step"):
-        SegmentationSettings(cell_step=False).validate_steps()
+        SegmentationSettings(cell_model="skip").validate_steps()
+
+
+def test_direct_step1_without_step2_produces_cells_only(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((1, 3, 1, 5, 5), dtype=np.uint8),
+        scales={"x": 0.5, "y": 0.5},
+    )
+
+    observed = {}
+
+    def fake_segment(czyx, spec, settings, scales):
+        observed["nuclei_channel"] = settings.nuclei_channel
+        labels = np.zeros((1, 5, 5), dtype=np.uint32)
+        labels[0, 1:4, 1:4] = 2
+        return labels, {
+            "device": "cpu",
+            "runtime_seconds": 0.0,
+            "model_cache_hit": False,
+            "timings": {},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    result = engine._segment_multistep_image(image, SegmentationSettings())
+    assert result.channel_labels == ["labels_cells"]
+    assert observed["nuclei_channel"] == 0
+
+
+def test_expansion_and_duplicate_step2_model_both_run(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((1, 3, 1, 5, 5), dtype=np.uint8),
+        scales={"x": 0.5, "y": 0.5},
+    )
+    calls = []
+
+    def fake_segment(czyx, spec, settings, scales):
+        calls.append((spec.id, settings.primary_channel))
+        labels = np.zeros((1, 5, 5), dtype=np.uint32)
+        labels[0, 2, 2] = 1
+        return labels, {
+            "device": "cpu",
+            "runtime_seconds": 0.0,
+            "model_cache_hit": bool(calls[:-1]),
+            "timings": {},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    result = engine._segment_multistep_image(
+        image,
+        SegmentationSettings(
+            cell_model="expand:cellpose3:nuclei",
+            cell_channel=1,
+            cell_nuclei_channel=3,
+            nucleus_model="cellpose3:nuclei",
+            nucleus_channel=2,
+        ),
+    )
+    assert calls == [("cellpose3:nuclei", 3), ("cellpose3:nuclei", 2)]
+    assert result.channel_labels == [
+        "labels_cells",
+        "labels_nuclei",
+        "labels_cytoplasm",
+    ]
+
+
+@pytest.mark.parametrize(
+    "cell_model,message",
+    [
+        ("unknown", "Unknown Step 1 selection"),
+        ("expand:", "must include a nucleus model"),
+        ("expand:unknown", "Unknown Step 1 expansion model"),
+    ],
+)
+def test_invalid_step1_selector_is_rejected(cell_model, message):
+    with pytest.raises(ValueError, match=message):
+        SegmentationSettings(cell_model=cell_model).validate_steps()
