@@ -171,7 +171,8 @@ def format_effective_parameters(parameters: dict[str, Any]) -> str | None:
                     f", model pixel={parameters['model_y_um']:.3f}x"
                     f"{parameters['model_x_um']:.3f} um"
                 )
-            rescale += ", labels restored to source grid"
+            restoration = parameters.get("label_restoration", "nearest-neighbor")
+            rescale += f", restoration={restoration}"
         return (
             f"effective: probability={parameters.get('probability_threshold'):g} "
             f"({parameters.get('probability_source')}), NMS={parameters.get('nms_threshold'):g} "

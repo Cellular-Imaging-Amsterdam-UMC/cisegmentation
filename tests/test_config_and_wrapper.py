@@ -44,6 +44,8 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["write_ome_zarr_labels"]["default"] is False
     assert parameters["write_ome_zarr_labels"]["mode"] == "advanced"
     assert parameters["write_ome_zarr_labels"]["section_id"] == "advanced"
+    assert parameters["smooth_stardist_labels"]["default"] is True
+    assert parameters["smooth_stardist_labels"]["mode"] == "advanced"
     assert parameters["remove_border_cells"]["default"] is True
     assert parameters["remove_border_cells"]["mode"] == "beginner"
     parameter_names = [item["name"] for item in config["parameters"]]
@@ -130,6 +132,15 @@ def test_bilayers_serializes_native_label_output_option():
     assert "--write-ome-zarr-labels True" in command
     args = build_parser().parse_args(["--write-ome-zarr-labels", "true"])
     assert args.write_ome_zarr_labels is True
+
+
+def test_bilayers_serializes_stardist_smoothing_option():
+    command = generate_cli_command(
+        load_config(), {"smooth_stardist_labels": False}
+    )
+    assert "--smooth-stardist-labels False" in command
+    args = build_parser().parse_args(["--smooth-stardist-labels", "false"])
+    assert args.smooth_stardist_labels is False
 
 
 def test_legacy_workflow_values_translate_to_selectors():

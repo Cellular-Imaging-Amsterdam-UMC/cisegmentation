@@ -49,6 +49,7 @@ class SegmentationSettings:
     flow_threshold: float = 0.4
     stardist_prob_threshold: float = -1.0
     stardist_nms_threshold: float = -1.0
+    smooth_stardist_labels: bool = True
     spotiflow_prob_threshold: float = -1.0
     spotiflow_min_distance: float = 1.0
     benchmark: bool = False

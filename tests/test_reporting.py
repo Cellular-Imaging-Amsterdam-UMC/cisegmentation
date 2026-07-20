@@ -124,8 +124,10 @@ def test_effective_parameters_report_model_defaults_and_stardist_rescaling():
             "rescale_x_factor": 0.8,
             "model_y_um": 0.5,
             "model_x_um": 0.5,
+            "label_restoration": "scaled-polygons",
         }
     )
     assert "probability=0.479 (thresholds.json), NMS=0.3" in stardist
     assert "80x100 -> 40x80" in stardist
     assert "model pixel=0.500x0.500 um" in stardist
+    assert "restoration=scaled-polygons" in stardist

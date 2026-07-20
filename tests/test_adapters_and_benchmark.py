@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from cisegmentation.adapters import (
     _cached_model,
@@ -6,6 +7,8 @@ from cisegmentation.adapters import (
     _configure_torch_runtime,
     _segment_instanseg,
     _spotiflow_min_distance_pixels,
+    _predict_stardist_tiled,
+    _restore_stardist_labels,
     _stardist_versatile_input,
     clear_model_cache,
     points_to_labels,
@@ -98,6 +101,86 @@ def test_stardist_versatile_downsamples_finer_than_half_micron():
 
     unchanged, _ = _stardist_versatile_input(image, {"y": 0.5, "x": 0.7})
     assert unchanged.shape == image.shape
+
+
+def test_rescaled_stardist_polygons_are_rasterized_on_anisotropic_source_grid():
+    labels = np.zeros((10, 10), dtype=np.uint32)
+    details = {
+        "points": np.array([[5.0, 5.0]], dtype=np.float32),
+        "dist": np.full((1, 16), 3.0, dtype=np.float32),
+        "prob": np.array([0.9], dtype=np.float32),
+    }
+    restored, method = _restore_stardist_labels(
+        labels, details, (30, 20), smooth=True
+    )
+    assert method == "scaled-polygons"
+    assert restored.shape == (30, 20)
+    assert restored.dtype == np.uint32
+    assert set(np.unique(restored)) == {0, 1}
+
+
+def test_stardist_nearest_restoration_and_unscaled_results_are_unchanged():
+    labels = np.zeros((4, 5), dtype=np.uint32)
+    labels[1:3, 1:4] = 7
+    nearest, method = _restore_stardist_labels(
+        labels, {}, (8, 10), smooth=False
+    )
+    expected = np.repeat(np.repeat(labels, 2, axis=0), 2, axis=1)
+    np.testing.assert_array_equal(nearest, expected)
+    assert method == "nearest-neighbor"
+
+    native, method = _restore_stardist_labels(labels, {}, labels.shape, smooth=True)
+    np.testing.assert_array_equal(native, labels)
+    assert method == "none"
+
+
+def test_rescaled_stardist_requires_valid_polygon_details_when_smoothing():
+    with pytest.raises(RuntimeError, match="disable Smooth Rescaled StarDist Labels"):
+        _restore_stardist_labels(
+            np.zeros((4, 4), dtype=np.uint32), {}, (8, 8), smooth=True
+        )
+
+
+def test_tiled_stardist_keeps_core_centers_and_translates_them_globally():
+    class FakeModel:
+        def __init__(self):
+            self.call = 0
+
+        def predict_instances(self, image, **_kwargs):
+            local_points = (
+                np.array([[100, 100], [1050, 1050]], dtype=np.float32)
+                if self.call == 0
+                else np.array([[100, 70]], dtype=np.float32)
+                if self.call == 1
+                else np.array([[70, 100]], dtype=np.float32)
+                if self.call == 2
+                else np.array([[70, 70]], dtype=np.float32)
+            )
+            self.call += 1
+            count = len(local_points)
+            return np.zeros(image.shape, dtype=np.uint32), {
+                "points": local_points,
+                "dist": np.ones((count, 8), dtype=np.float32),
+                "prob": np.full(count, 0.9, dtype=np.float32),
+            }
+
+    labels, details = _predict_stardist_tiled(
+        FakeModel(),
+        np.zeros((1100, 1100), dtype=np.float32),
+        None,
+        None,
+        collect_polygons=True,
+    )
+    assert labels.shape == (1100, 1100)
+    np.testing.assert_array_equal(
+        details["points"],
+        np.array(
+            [[100, 100], [100, 1030], [1030, 100], [1030, 1030]],
+            dtype=np.float32,
+        ),
+    )
+    assert details["dist"].shape == (4, 8)
+    assert details["prob"].shape == (4,)
 
 
 def test_center_crop_is_centered_and_at_most_1024():

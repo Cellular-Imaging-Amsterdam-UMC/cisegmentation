@@ -305,34 +305,132 @@ def _stardist_model_path(checkpoint: str) -> Path:
 
 
 def _predict_stardist_tiled(
-    model, image: np.ndarray, prob: float | None, nms: float | None
-) -> np.ndarray:
+    model,
+    image: np.ndarray,
+    prob: float | None,
+    nms: float | None,
+    *,
+    collect_polygons: bool = False,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     tile_size, halo = 1024, 64
     height, width = image.shape[-2:]
     if height <= tile_size and width <= tile_size:
-        labels, _ = model.predict_instances(
+        labels, details = model.predict_instances(
             image, prob_thresh=prob, nms_thresh=nms, normalize=True
         )
-        return np.asarray(labels, dtype=np.uint32)
+        return np.asarray(labels, dtype=np.uint32), details
     output = np.zeros((height, width), dtype=np.uint32)
     offset = 0
+    distances: list[np.ndarray] = []
+    points: list[np.ndarray] = []
+    probabilities: list[np.ndarray] = []
     for y0 in range(0, height, tile_size):
         for x0 in range(0, width, tile_size):
             y1, x1 = min(y0 + tile_size, height), min(x0 + tile_size, width)
             ry0, rx0 = max(0, y0 - halo), max(0, x0 - halo)
             ry1, rx1 = min(height, y1 + halo), min(width, x1 + halo)
-            labels, _ = model.predict_instances(
+            labels, details = model.predict_instances(
                 image[ry0:ry1, rx0:rx1],
                 prob_thresh=prob,
                 nms_thresh=nms,
                 normalize=True,
             )
+            tile_points = np.asarray(details.get("points", []), dtype=np.float32)
+            tile_distances = np.asarray(details.get("dist", []), dtype=np.float32)
+            tile_probabilities = np.asarray(details.get("prob", []), dtype=np.float32)
+            if collect_polygons and tile_points.size:
+                if (
+                    tile_points.ndim != 2
+                    or tile_points.shape[1] != 2
+                    or tile_distances.ndim != 2
+                    or len(tile_distances) != len(tile_points)
+                    or len(tile_probabilities) != len(tile_points)
+                ):
+                    raise RuntimeError(
+                        "StarDist polygon details are malformed; disable Smooth "
+                        "Rescaled StarDist Labels to use nearest-neighbor restoration"
+                    )
+                keep = (
+                    (tile_points[:, 0] >= y0 - ry0)
+                    & (tile_points[:, 0] < y1 - ry0)
+                    & (tile_points[:, 1] >= x0 - rx0)
+                    & (tile_points[:, 1] < x1 - rx0)
+                )
+                if np.any(keep):
+                    global_points = tile_points[keep].copy()
+                    global_points[:, 0] += ry0
+                    global_points[:, 1] += rx0
+                    points.append(global_points)
+                    distances.append(tile_distances[keep])
+                    probabilities.append(tile_probabilities[keep])
             core = np.asarray(labels)[y0 - ry0 : y1 - ry0, x0 - rx0 : x1 - rx0]
             if offset:
                 core = np.where(core > 0, core.astype(np.uint64) + offset, 0)
             output[y0:y1, x0:x1] = core.astype(np.uint32)
             offset = int(output.max(initial=offset))
-    return output
+    details = {
+        "points": np.concatenate(points, axis=0)
+        if points
+        else np.zeros((0, 2), dtype=np.float32),
+        "dist": np.concatenate(distances, axis=0)
+        if distances
+        else np.zeros((0, 0), dtype=np.float32),
+        "prob": np.concatenate(probabilities, axis=0)
+        if probabilities
+        else np.zeros((0,), dtype=np.float32),
+    }
+    return output, details
+
+
+def _restore_stardist_labels(
+    labels: np.ndarray,
+    details: dict[str, Any],
+    source_shape: tuple[int, int],
+    *,
+    smooth: bool,
+) -> tuple[np.ndarray, str]:
+    """Restore model-grid labels while preserving StarDist polygon geometry."""
+    model_labels = np.asarray(labels, dtype=np.uint32)
+    model_shape = tuple(model_labels.shape)
+    if model_shape == source_shape:
+        return model_labels, "none"
+    if not smooth:
+        return _resize_2d(model_labels, source_shape, labels=True), "nearest-neighbor"
+    try:
+        points = np.asarray(details["points"], dtype=np.float32)
+        distances = np.asarray(details["dist"], dtype=np.float32)
+        probabilities = np.asarray(details["prob"], dtype=np.float32)
+        valid = (
+            points.ndim == 2
+            and points.shape[1] == 2
+            and distances.ndim == 2
+            and len(distances) == len(points)
+            and probabilities.ndim == 1
+            and len(probabilities) == len(points)
+        )
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        raise RuntimeError(
+            "StarDist polygon details are unavailable or malformed; disable Smooth "
+            "Rescaled StarDist Labels to use nearest-neighbor restoration"
+        )
+    if not len(points):
+        return np.zeros(source_shape, dtype=np.uint32), "scaled-polygons"
+    scale = np.asarray(
+        [source_shape[0] / model_shape[0], source_shape[1] / model_shape[1]],
+        dtype=np.float32,
+    )
+    from cistardist_pytorch.model import polygons_to_label
+
+    restored = polygons_to_label(
+        distances,
+        points * scale,
+        shape=source_shape,
+        prob=probabilities,
+        scale_dist=(float(scale[0]), float(scale[1])),
+    )
+    return np.asarray(restored, dtype=np.uint32), "scaled-polygons"
 
 
 def _segment_stardist(
@@ -365,6 +463,7 @@ def _segment_stardist(
     effective_nms = float(model_thresholds.get("nms", 0.4) if nms is None else nms)
     source_shape = tuple(czyx[channel, 0].shape)
     model_shape = source_shape
+    restoration = "none"
     planes = []
     for z_index in range(czyx.shape[1]):
         plane = czyx[channel, z_index]
@@ -372,8 +471,23 @@ def _segment_stardist(
         if spec.checkpoint == "SD_Nuclei_Versatile":
             plane, original_shape = _stardist_versatile_input(plane, scales)
             model_shape = tuple(plane.shape)
-        labels = _predict_stardist_tiled(model, plane, prob, nms)
-        planes.append(_resize_2d(labels, original_shape, labels=True))
+        labels, details = _predict_stardist_tiled(
+            model,
+            plane,
+            prob,
+            nms,
+            collect_polygons=(
+                settings.smooth_stardist_labels
+                and tuple(plane.shape) != original_shape
+            ),
+        )
+        labels, restoration = _restore_stardist_labels(
+            labels,
+            details,
+            original_shape,
+            smooth=settings.smooth_stardist_labels,
+        )
+        planes.append(labels)
     labels = _unique_plane_labels(planes)
     y_factor = model_shape[0] / source_shape[0]
     x_factor = model_shape[1] / source_shape[1]
@@ -390,6 +504,7 @@ def _segment_stardist(
         "model_y_um": float(scales["y"]) / y_factor if "y" in scales else None,
         "model_x_um": float(scales["x"]) / x_factor if "x" in scales else None,
         "labels_restored_to_source_grid": model_shape != source_shape,
+        "label_restoration": restoration,
     }
     return labels, {
         **timing,
