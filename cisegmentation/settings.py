@@ -6,11 +6,13 @@ import json
 
 CELL_MODELS = (
     "cellpose3:cyto3",
+    "cellpose-sam:cpsam_v2",
     "cellpose-sam:cpsam",
     "instanseg:fluorescence_nuclei_and_cells",
 )
 STEP1_NUCLEUS_MODELS = (
     "cellpose3:nuclei",
+    "cellpose-sam:cpsam_v2",
     "cellpose-sam:cpsam",
     "stardist:SD_Nuclei_Versatile",
     "instanseg:single_channel_nuclei",
@@ -34,6 +36,7 @@ FOCI_MODELS = (
 
 SKIP = "skip"
 EXPANSION_PREFIX = "expand:"
+MEASUREMENT_DATABASE_FORMATS = ("duckdb", "sqlite", "skip")
 
 
 @dataclass
@@ -52,6 +55,7 @@ class SegmentationSettings:
     smooth_stardist_labels: bool = True
     spotiflow_prob_threshold: float = -1.0
     spotiflow_min_distance: float = 1.0
+    spotiflow_local_refinement: bool = False
     benchmark: bool = False
     cell_model: str = "cellpose3:cyto3"
     cell_channel: int = 1
@@ -69,6 +73,7 @@ class SegmentationSettings:
     foci_channel_4: int = 1
     include_original_channels: bool = False
     write_ome_zarr_labels: bool = False
+    measurements_database: str = "duckdb"
     remove_border_cells: bool = True
 
     def to_dict(self) -> dict:
@@ -131,6 +136,10 @@ class SegmentationSettings:
             raise ValueError("Step 1 nucleus channel must be zero or greater")
         if self.cell_expansion_distance < 0:
             raise ValueError("Cell expansion distance must be zero or greater")
+        if self.measurements_database not in MEASUREMENT_DATABASE_FORMATS:
+            raise ValueError(
+                "Create Measurements Database must be duckdb, sqlite, or skip"
+            )
 
 
 _LEGACY_FIELDS = {
@@ -146,6 +155,14 @@ _LEGACY_FIELDS = {
 def normalize_legacy_workflow_values(values: dict) -> dict:
     """Translate the former checkbox-based workflow into selector values."""
     normalized = dict(values)
+    if (
+        "spotiflow_microsam_refinement" in normalized
+        and "spotiflow_local_refinement" not in normalized
+    ):
+        normalized["spotiflow_local_refinement"] = normalized[
+            "spotiflow_microsam_refinement"
+        ]
+    normalized.pop("spotiflow_microsam_refinement", None)
     if not any(name in normalized for name in _LEGACY_FIELDS):
         return normalized
 

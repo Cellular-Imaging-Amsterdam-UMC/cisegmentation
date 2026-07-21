@@ -22,6 +22,19 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["diameter"]["mode"] == "advanced"
     assert parameters["diameter"]["minimum"] == -1.0
     assert parameters["spotiflow_min_distance"]["type"] == "float"
+    assert parameters["spotiflow_local_refinement"] == {
+        "name": "spotiflow_local_refinement",
+        "type": "checkbox",
+        "label": "Spotiflow Local Mask Refinement",
+        "description": "Grow each Spotiflow point into a bounded mask using local signal and background. Supports 2D and forced slice-wise 2D.",
+        "default": False,
+        "cli_tag": "--spotiflow-local-refinement",
+        "cli_order": 28,
+        "optional": True,
+        "append_value": True,
+        "section_id": "advanced",
+        "mode": "advanced",
+    }
     assert "multi_step" not in parameters
     removed = {
         "cell_step",
@@ -64,6 +77,10 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["include_original_channels"]["mode"] == "beginner"
     assert parameters["include_original_channels"]["section_id"] == "essential"
     assert parameters["benchmark"]["mode"] == "advanced"
+    assert parameters["measurements_database"]["default"] == "duckdb"
+    assert [
+        option["value"] for option in parameters["measurements_database"]["options"]
+    ] == ["duckdb", "sqlite", "skip"]
     advanced_names = [
         item["name"]
         for item in config["parameters"]
@@ -93,6 +110,14 @@ def test_bilayers_config_is_structurally_valid():
     assert tuple(
         option["value"] for option in parameters["foci_model_1"]["options"]
     ) == (SKIP, *FOCI_MODELS)
+    assert parameters["cell_model"]["options"][2] == {
+        "label": "Cellpose-SAM v2",
+        "value": "cellpose-sam:cpsam_v2",
+    }
+    assert parameters["cell_model"]["options"][3] == {
+        "label": "Cellpose-SAM original",
+        "value": "cellpose-sam:cpsam",
+    }
 
 
 def test_wrapper_accepts_hyphenated_bilayers_parameters():
@@ -117,12 +142,40 @@ def test_wrapper_accepts_hyphenated_bilayers_parameters():
     assert args.benchmark is True
 
 
+def test_wrapper_accepts_spotiflow_local_refinement_boolean_and_legacy_alias():
+    args = build_parser().parse_args(["--spotiflow-local-refinement", "true"])
+    assert args.spotiflow_local_refinement is True
+    legacy = build_parser().parse_args(["--spotiflow-microsam-refinement", "true"])
+    assert legacy.spotiflow_microsam_refinement is True
+    assert normalize_legacy_workflow_values(vars(legacy))[
+        "spotiflow_local_refinement"
+    ] is True
+
+    command = generate_cli_command(
+        load_config(), {"spotiflow_local_refinement": True}
+    )
+    assert "--spotiflow-local-refinement True" in command
+
+
 def test_bilayers_serializes_skip_selectors():
     command = generate_cli_command(
         load_config(), {"cell_model": SKIP, "nucleus_model": "cellpose3:nuclei"}
     )
     assert "--cell-model skip" in command
     assert "--nucleus-model cellpose3:nuclei" in command
+
+
+def test_bilayers_serializes_cellpose_sam_v2_and_original_selectors():
+    v2 = generate_cli_command(
+        load_config(),
+        {"cell_model": "cellpose-sam:cpsam_v2", "nucleus_model": "skip"},
+    )
+    original = generate_cli_command(
+        load_config(),
+        {"cell_model": "cellpose-sam:cpsam", "nucleus_model": "skip"},
+    )
+    assert "--cell-model cellpose-sam:cpsam_v2" in v2
+    assert "--cell-model cellpose-sam:cpsam" in original
 
 
 def test_bilayers_serializes_native_label_output_option():
@@ -132,6 +185,15 @@ def test_bilayers_serializes_native_label_output_option():
     assert "--write-ome-zarr-labels True" in command
     args = build_parser().parse_args(["--write-ome-zarr-labels", "true"])
     assert args.write_ome_zarr_labels is True
+
+
+def test_bilayers_serializes_measurements_database_option():
+    command = generate_cli_command(
+        load_config(), {"measurements_database": "sqlite"}
+    )
+    assert "--measurements-database sqlite" in command
+    args = build_parser().parse_args(["--measurements-database", "skip"])
+    assert args.measurements_database == "skip"
 
 
 def test_bilayers_serializes_stardist_smoothing_option():

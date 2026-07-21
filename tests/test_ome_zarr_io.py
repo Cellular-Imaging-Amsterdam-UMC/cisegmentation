@@ -10,6 +10,7 @@ from cisegmentation.ome_zarr_io import (  # noqa: E402
     discover_ome_zarrs,
     enumerate_resources,
     read_image,
+    write_hcs_plate,
     write_label_image,
 )
 
@@ -88,6 +89,35 @@ def test_write_standalone_int32_label_zarr(inputfolder, outputfolder):
         "total_seconds",
     }
     assert (output / "OME" / "METADATA.ome.xml").exists()
+
+
+def test_hcs_root_aggregates_result_reuse_counts(inputfolder, outputfolder):
+    source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
+    source.resource.plate_path = ("A", "1", "0")
+    labels = np.zeros(
+        (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+    )
+    result = LabelResult(
+        labels,
+        source,
+        "multi-step",
+        "multi-step",
+        provenance={
+            "model_cache_hits": 1,
+            "model_cache_misses": 1,
+            "result_cache_hits": 2,
+            "timings": {
+                "inference_seconds": 1.0,
+                "spot_detection_seconds": 0.25,
+                "local_refinement_seconds": 0.5,
+            },
+        },
+    )
+
+    output = write_hcs_plate([result], outputfolder / "plate-result.ome.zarr")
+    root = zarr.open_group(str(output), mode="r")
+    assert root.attrs["cisegmentation"]["result_cache_hits"] == 2
+    assert root.attrs["cisegmentation"]["timings"]["local_refinement_seconds"] == 0.5
 
 
 def test_label_writer_rejects_ids_outside_int32_range(inputfolder, outputfolder):

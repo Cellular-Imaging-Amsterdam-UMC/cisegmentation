@@ -228,7 +228,11 @@ def _gallery(
         labels = labels_by_case.get(case.key)
         if labels is not None:
             overlay = _label_overlay(
-                raw, labels, panel_w, image_h, case.target == "spots"
+                raw,
+                labels,
+                panel_w,
+                image_h,
+                bool(run.get("locations_only", case.target == "spots")),
             )
             montage.paste(overlay, (x, output_y + header_h))
         else:

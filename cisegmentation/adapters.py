@@ -15,6 +15,9 @@ from .settings import SegmentationSettings
 
 _MODEL_CACHE: dict[tuple[str, str], Any] = {}
 _TRITON_FLOP_WARNING = "triton not found; flop counting will not work for triton kernels"
+_SPOT_REFINEMENT_MAX_RADIUS_UM = 1.0
+_SPOT_REFINEMENT_THRESHOLD_FRACTION = 0.30
+_SPOT_REFINEMENT_NOISE_SIGMAS = 3.0
 
 
 class _TritonFlopWarningFilter(logging.Filter):
@@ -213,6 +216,182 @@ def points_to_labels(points: np.ndarray, shape: tuple[int, ...]) -> np.ndarray:
                 if placed:
                     break
     return labels
+
+
+def _smooth_spot_plane(image: np.ndarray) -> np.ndarray:
+    """Apply a small dependency-free Gaussian-like filter to one image plane."""
+    array = np.asarray(image, dtype=np.float32)
+    finite = array[np.isfinite(array)]
+    fill = float(np.median(finite)) if finite.size else 0.0
+    clean = np.nan_to_num(array, nan=fill, posinf=fill, neginf=fill)
+    padded = np.pad(clean, 1, mode="edge")
+    return (
+        padded[:-2, :-2]
+        + 2 * padded[:-2, 1:-1]
+        + padded[:-2, 2:]
+        + 2 * padded[1:-1, :-2]
+        + 4 * padded[1:-1, 1:-1]
+        + 2 * padded[1:-1, 2:]
+        + padded[2:, :-2]
+        + 2 * padded[2:, 1:-1]
+        + padded[2:, 2:]
+    ) / 16.0
+
+
+def _connected_seed_component(binary: np.ndarray, seed: tuple[int, int]) -> np.ndarray:
+    """Return the 8-connected foreground component containing ``seed``."""
+    output = np.zeros(binary.shape, dtype=bool)
+    if not binary[seed]:
+        return output
+    height, width = binary.shape
+    stack = [seed]
+    output[seed] = True
+    while stack:
+        y, x = stack.pop()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if not (dy or dx):
+                    continue
+                ny, nx = y + dy, x + dx
+                if (
+                    0 <= ny < height
+                    and 0 <= nx < width
+                    and binary[ny, nx]
+                    and not output[ny, nx]
+                ):
+                    output[ny, nx] = True
+                    stack.append((ny, nx))
+    return output
+
+
+def _local_spot_candidate(
+    smoothed: np.ndarray,
+    point_yx: np.ndarray,
+    radius_y: float,
+    radius_x: float,
+) -> dict[str, Any]:
+    """Grow one seed inside a physical ellipse using local background statistics."""
+    height, width = smoothed.shape
+    seed_y = min(max(int(round(float(point_yx[0]))), 0), height - 1)
+    seed_x = min(max(int(round(float(point_yx[1]))), 0), width - 1)
+    outer_y, outer_x = max(2, int(np.ceil(radius_y * 1.5))), max(
+        2, int(np.ceil(radius_x * 1.5))
+    )
+    y0, y1 = max(0, seed_y - outer_y), min(height, seed_y + outer_y + 1)
+    x0, x1 = max(0, seed_x - outer_x), min(width, seed_x + outer_x + 1)
+    patch = smoothed[y0:y1, x0:x1]
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    distance = ((yy - seed_y) / radius_y) ** 2 + ((xx - seed_x) / radius_x) ** 2
+    allowed = distance <= 1.0
+    annulus = (distance >= 1.0) & (distance <= 2.25)
+    background_values = patch[annulus]
+    if not background_values.size:
+        background_values = patch[~allowed]
+    if not background_values.size:
+        background_values = patch.reshape(-1)
+    background = float(np.median(background_values))
+    noise = float(1.4826 * np.median(np.abs(background_values - background)))
+    peak_y0, peak_y1 = max(0, seed_y - 1), min(height, seed_y + 2)
+    peak_x0, peak_x1 = max(0, seed_x - 1), min(width, seed_x + 2)
+    peak = float(np.max(smoothed[peak_y0:peak_y1, peak_x0:peak_x1]))
+    contrast = max(0.0, peak - background)
+    threshold = max(
+        background + _SPOT_REFINEMENT_NOISE_SIGMAS * noise,
+        background + _SPOT_REFINEMENT_THRESHOLD_FRACTION * contrast,
+    )
+    binary = allowed & (patch >= threshold)
+    local_seed = (seed_y - y0, seed_x - x0)
+    component = _connected_seed_component(binary, local_seed)
+    fallback = not np.any(component)
+    if fallback:
+        component[local_seed] = True
+    return {
+        "mask": component,
+        "bbox": (y0, x0, y1, x1),
+        "seed_yx": (seed_y, seed_x),
+        "score": contrast / max(noise, 1e-6),
+        "fallback": fallback,
+    }
+
+
+def _merge_local_spot_candidates(
+    candidates: list[dict[str, Any]], shape: tuple[int, int]
+) -> tuple[np.ndarray, dict[str, int]]:
+    """Assign overlapping candidates by local signal-to-noise score."""
+    labels = np.zeros(shape, dtype=np.uint32)
+    overlap_pixels = 0
+    suppressed = 0
+    grown = 0
+    fallbacks = 0
+    next_label = 0
+    for candidate in sorted(candidates, key=lambda item: -float(item["score"])):
+        seed_y, seed_x = candidate["seed_yx"]
+        if labels[seed_y, seed_x] != 0:
+            suppressed += 1
+            continue
+        y0, x0, y1, x1 = candidate["bbox"]
+        target = labels[y0:y1, x0:x1]
+        overlap_pixels += int(np.count_nonzero(candidate["mask"] & (target != 0)))
+        available = candidate["mask"] & (target == 0)
+        if not np.any(available):
+            suppressed += 1
+            continue
+        next_label += 1
+        target[available] = next_label
+        if candidate["fallback"]:
+            fallbacks += 1
+        elif np.count_nonzero(available) > 1:
+            grown += 1
+    return labels, {
+        "refined_masks": next_label,
+        "grown_masks": grown,
+        "single_pixel_fallbacks": fallbacks,
+        "suppressed_duplicate_seeds": suppressed,
+        "overlap_pixels_removed": overlap_pixels,
+    }
+
+
+def _refine_spotiflow_points(
+    volume: np.ndarray,
+    points_by_plane: list[np.ndarray],
+    scales: dict[str, float],
+) -> tuple[np.ndarray, dict[str, Any], dict[str, Any]]:
+    """Convert Spotiflow points to bounded, locally thresholded instance masks."""
+    y_um, x_um = _xy_pixel_sizes_um(scales, "Spotiflow local mask refinement")
+    radius_y = max(1.0, _SPOT_REFINEMENT_MAX_RADIUS_UM / y_um)
+    radius_x = max(1.0, _SPOT_REFINEMENT_MAX_RADIUS_UM / x_um)
+    started = time.perf_counter()
+    planes = []
+    totals = {
+        "detected_points": sum(len(points) for points in points_by_plane),
+        "refined_masks": 0,
+        "grown_masks": 0,
+        "single_pixel_fallbacks": 0,
+        "suppressed_duplicate_seeds": 0,
+        "overlap_pixels_removed": 0,
+        "refinement_max_radius_um": _SPOT_REFINEMENT_MAX_RADIUS_UM,
+        "refinement_radius_y_pixels": radius_y,
+        "refinement_radius_x_pixels": radius_x,
+        "refinement_threshold_fraction": _SPOT_REFINEMENT_THRESHOLD_FRACTION,
+        "refinement_noise_sigmas": _SPOT_REFINEMENT_NOISE_SIGMAS,
+        "refinement_smoothing": "3x3-binomial",
+    }
+    for z_index, points in enumerate(points_by_plane):
+        smoothed = _smooth_spot_plane(volume[z_index])
+        candidates = [
+            _local_spot_candidate(smoothed, point, radius_y, radius_x)
+            for point in points
+        ]
+        labels, summary = _merge_local_spot_candidates(
+            candidates, volume[z_index].shape
+        )
+        for name, value in summary.items():
+            totals[name] += value
+        planes.append(labels)
+    labels = _unique_plane_labels(planes) if planes else np.zeros(volume.shape, np.uint32)
+    return labels, totals, {
+        "local_refinement_seconds": time.perf_counter() - started,
+    }
 
 
 def _segment_cellpose(
@@ -588,6 +767,18 @@ def _segment_spotiflow(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     root = _configure_model_cache()
     cache = Path(os.environ.get("SPOTIFLOW_CACHE_DIR", root / "spotiflow"))
+    channel = settings.selected_channels(czyx.shape[0])[0]
+    volume = czyx[channel]
+    native_3d = (
+        volume.shape[0] > 1
+        and spec.dimensions == "3d"
+        and settings.dimension_mode != "slice-2d"
+    )
+    if native_3d and settings.spotiflow_local_refinement:
+        raise ValueError(
+            "Spotiflow Local Mask Refinement supports slice-wise 2D; select "
+            "Force slice-wise 2D"
+        )
     model, timing = _cached_model(
         spec.id,
         device,
@@ -599,9 +790,6 @@ def _segment_spotiflow(
             map_location=device,
         ),
     )
-    inference_started = time.perf_counter()
-    channel = settings.selected_channels(czyx.shape[0])[0]
-    volume = czyx[channel]
     threshold = (
         None
         if settings.spotiflow_prob_threshold < 0
@@ -623,12 +811,9 @@ def _segment_spotiflow(
         else "configured",
         "minimum_distance_pixels": int(min_distance),
         "minimum_distance_um": float(min_distance * (y_um + x_um) / 2.0),
+        "local_refinement": bool(settings.spotiflow_local_refinement),
     }
-    native_3d = (
-        volume.shape[0] > 1
-        and spec.dimensions == "3d"
-        and settings.dimension_mode != "slice-2d"
-    )
+    detection_started = time.perf_counter()
     if native_3d:
         points, _ = model.predict(
             volume,
@@ -637,31 +822,85 @@ def _segment_spotiflow(
             device=device,
             verbose=False,
         )
+        detection_seconds = time.perf_counter() - detection_started
         labels = points_to_labels(points, volume.shape)
+        effective.update(
+            {
+                "output_mode": "point-locations",
+                "detected_points": int(len(points)),
+            }
+        )
         return labels, {
             **timing,
+            "model_cache_hits": int(bool(timing.get("model_cache_hit"))),
+            "model_cache_misses": int(not bool(timing.get("model_cache_hit"))),
+            "locations_only": True,
             "effective_parameters": effective,
-            "inference_seconds": time.perf_counter() - inference_started,
+            "spot_detection_seconds": detection_seconds,
+            "inference_seconds": detection_seconds,
         }
-    labels = _unique_plane_labels(
-        [
-            points_to_labels(
-                model.predict(
-                    volume[z],
-                    prob_thresh=threshold,
-                    min_distance=min_distance,
-                    device=device,
-                    verbose=False,
-                )[0],
-                volume[z].shape,
-            )
-            for z in range(volume.shape[0])
-        ]
+    points_by_plane = [
+        np.asarray(
+            model.predict(
+                volume[z],
+                prob_thresh=threshold,
+                min_distance=min_distance,
+                device=device,
+                verbose=False,
+            )[0],
+            dtype=np.float32,
+        ).reshape(-1, 2)
+        for z in range(volume.shape[0])
+    ]
+    detection_seconds = time.perf_counter() - detection_started
+    detected_points = sum(len(points) for points in points_by_plane)
+    if not settings.spotiflow_local_refinement:
+        labels = _unique_plane_labels(
+            [
+                points_to_labels(points, volume[z].shape)
+                for z, points in enumerate(points_by_plane)
+            ]
+        )
+        effective.update(
+            {
+                "output_mode": "point-locations",
+                "detected_points": int(detected_points),
+            }
+        )
+        return labels, {
+            **timing,
+            "model_cache_hits": int(bool(timing.get("model_cache_hit"))),
+            "model_cache_misses": int(not bool(timing.get("model_cache_hit"))),
+            "locations_only": True,
+            "effective_parameters": effective,
+            "spot_detection_seconds": detection_seconds,
+            "inference_seconds": detection_seconds,
+        }
+
+    labels, refinement, refinement_timing = _refine_spotiflow_points(
+        volume, points_by_plane, scales
+    )
+    effective.update(
+        {
+            **refinement,
+            "output_mode": "instance-masks",
+            "refinement_method": "bounded-local-intensity",
+        }
+    )
+    local_refinement_seconds = float(
+        refinement_timing.get("local_refinement_seconds", 0.0)
     )
     return labels, {
-        **timing,
+        "model_cache_hit": bool(timing.get("model_cache_hit")),
+        "model_cache_hits": int(bool(timing.get("model_cache_hit"))),
+        "model_cache_misses": int(not bool(timing.get("model_cache_hit"))),
+        "locations_only": False,
+        "import_seconds": float(timing.get("import_seconds", 0.0)),
+        "model_load_seconds": float(timing.get("model_load_seconds", 0.0)),
         "effective_parameters": effective,
-        "inference_seconds": time.perf_counter() - inference_started,
+        "spot_detection_seconds": detection_seconds,
+        "local_refinement_seconds": local_refinement_seconds,
+        "inference_seconds": detection_seconds + local_refinement_seconds,
     }
 
 
@@ -709,6 +948,14 @@ def segment_czyx(
         raise ValueError(f"No adapter for model family {spec.family}")
     elapsed = time.perf_counter() - start
     effective_parameters = timing.pop("effective_parameters", {})
+    model_cache_hit = bool(timing.pop("model_cache_hit", False))
+    model_cache_hits = int(timing.pop("model_cache_hits", int(model_cache_hit)))
+    model_cache_misses = int(
+        timing.pop("model_cache_misses", int(not model_cache_hit))
+    )
+    locations_only = bool(
+        timing.pop("locations_only", spec.family == "spotiflow")
+    )
     timing = {
         **timing,
         "import_seconds": float(timing.get("import_seconds", 0.0))
@@ -725,7 +972,10 @@ def segment_czyx(
         and labels.shape[0] > 1
         and settings.dimension_mode != "slice-2d"
         else "slice-2d",
-        "model_cache_hit": bool(timing.get("model_cache_hit")),
+        "model_cache_hit": model_cache_hit,
+        "model_cache_hits": model_cache_hits,
+        "model_cache_misses": model_cache_misses,
+        "locations_only": locations_only,
         "effective_parameters": effective_parameters,
         "timings": timing,
     }

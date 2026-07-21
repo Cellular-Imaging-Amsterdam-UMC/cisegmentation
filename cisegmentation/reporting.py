@@ -130,6 +130,15 @@ def step_record(
         "dimension_mode": info.get("dimension_mode"),
         "runtime_seconds": float(info.get("runtime_seconds", 0.0)),
         "model_cache_hit": bool(info.get("model_cache_hit")),
+        "model_cache_hits": int(
+            info.get("model_cache_hits", bool(info.get("model_cache_hit")))
+        ),
+        "model_cache_misses": int(
+            info.get("model_cache_misses", not bool(info.get("model_cache_hit")))
+        ),
+        "locations_only": bool(info.get("locations_only", target == "spots")),
+        "result_cache_hit": bool(info.get("result_cache_hit")),
+        "reused_from_step": info.get("reused_from_step"),
         "timings": {
             key: float(value) for key, value in info.get("timings", {}).items()
         },
@@ -179,12 +188,32 @@ def format_effective_parameters(parameters: dict[str, Any]) -> str | None:
             f"({parameters.get('nms_source')}), rescale={rescale}"
         )
     if adapter == "spotiflow":
-        return (
+        result = (
             f"effective: probability={parameters.get('probability_threshold'):g} "
             f"({parameters.get('probability_source')}), minimum distance="
             f"{parameters.get('minimum_distance_pixels')} px / "
             f"{parameters.get('minimum_distance_um'):.3f} um"
         )
+        if parameters.get("local_refinement"):
+            result += (
+                f", local mask refinement=bounded intensity growth, maximum radius="
+                f"{parameters.get('refinement_max_radius_um'):g} um "
+                f"({parameters.get('refinement_radius_y_pixels'):.1f}x"
+                f"{parameters.get('refinement_radius_x_pixels'):.1f} px), "
+                f"threshold=max(local background + "
+                f"{parameters.get('refinement_noise_sigmas'):g} noise sigma, "
+                f"{parameters.get('refinement_threshold_fraction') * 100:g}% contrast)"
+            )
+            result += (
+                f"; points={parameters.get('detected_points', 0)}, "
+                f"masks={parameters.get('refined_masks', 0)}, "
+                f"grown={parameters.get('grown_masks', 0)}, "
+                f"single-pixel fallbacks={parameters.get('single_pixel_fallbacks', 0)}, "
+                f"duplicate seeds suppressed="
+                f"{parameters.get('suppressed_duplicate_seeds', 0)}, "
+                f"overlap pixels removed={parameters.get('overlap_pixels_removed', 0)}"
+            )
+        return result
     if adapter == "instanseg":
         return f"effective: model pixel size={parameters.get('pixel_size_um'):.3f} um"
     return None
@@ -198,12 +227,15 @@ def format_step_record(record: dict[str, Any]) -> list[str]:
     device_name = record.get("device_name")
     if device_name and str(device_name).lower() != device.lower():
         device += f" ({device_name})"
-    cache = "cache hit" if record.get("model_cache_hit") else "model loaded"
+    if record.get("result_cache_hit"):
+        cache = f"result reused from {record.get('reused_from_step') or 'earlier step'}"
+    else:
+        cache = "cache hit" if record.get("model_cache_hit") else "model loaded"
     lines = [
         f"  {record['step']} | T{record['timepoint'] + 1} | {record['model']} | {channels}",
         f"    device={device}, mode={record.get('dimension_mode') or 'unknown'}, "
         f"runtime={record['runtime_seconds']:.2f}s, {cache}",
-        f"    {format_label_statistics(record['label_statistics'], locations_only=record.get('target') == 'spots')}",
+        f"    {format_label_statistics(record['label_statistics'], locations_only=record.get('locations_only', record.get('target') == 'spots'))}",
     ]
     effective = format_effective_parameters(record.get("effective_parameters", {}))
     if effective:
@@ -215,6 +247,8 @@ def format_step_record(record: dict[str, Any]) -> list[str]:
             "import_seconds",
             "device_setup_seconds",
             "model_load_seconds",
+            "spot_detection_seconds",
+            "local_refinement_seconds",
             "inference_seconds",
         )
         if float(timings.get(name, 0.0)) > 0
@@ -305,6 +339,12 @@ def workflow_report_lines(settings) -> list[str]:
         f"  {step2}",
         *(f"  {line}" for line in foci),
         f"  runtime: requested device={settings.device}, dimensions={settings.dimension_mode}",
+        "  Spotiflow output: "
+        + (
+            "bounded local intensity instance masks"
+            if settings.spotiflow_local_refinement
+            else "single-pixel point locations"
+        ),
         f"  post-processing: remove border cells={settings.remove_border_cells}",
         "  output: "
         + (
@@ -312,5 +352,6 @@ def workflow_report_lines(settings) -> list[str]:
             if settings.write_ome_zarr_labels
             else "labels as image channels"
         ),
+        f"  measurements database: {settings.measurements_database}",
         "  effective model parameters are reported for each segmentation below",
     ]

@@ -226,6 +226,7 @@ class NoWheelDoubleSpinBox(QDoubleSpinBox):
 class CollapsiblePanel(QWidget):
     def __init__(self, title: str):
         super().__init__()
+        self._collapsed_window_height: int | None = None
         self.toggle = QToolButton(text=title, checkable=True, checked=False)
         self.toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.toggle.setArrowType(Qt.ArrowType.RightArrow)
@@ -238,11 +239,50 @@ class CollapsiblePanel(QWidget):
         layout.addWidget(self.content)
 
     def _set_open(self, opened: bool) -> None:
+        window = self.window()
+        if opened and not window.isMaximized() and not window.isFullScreen():
+            self._collapsed_window_height = window.height()
         self.toggle.setArrowType(
             Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow
         )
         self.content.setVisible(opened)
-        self.window().adjustSize()
+        self.content.updateGeometry()
+        self.updateGeometry()
+        # Visibility changes are not fully reflected in the top-level size hint
+        # until Qt has completed the current event. Resizing immediately with
+        # adjustSize() can therefore retain the expanded height after collapse,
+        # and the vertical layout distributes that surplus inside every panel.
+        target_height = None if opened else self._collapsed_window_height
+        QTimer.singleShot(
+            0, lambda: self._fit_window_to_visible_content(target_height, retry=True)
+        )
+
+    def _fit_window_to_visible_content(
+        self, target_height: int | None = None, *, retry: bool = False
+    ) -> None:
+        window = self.window()
+        if window.isMaximized() or window.isFullScreen():
+            return
+        own_layout = self.layout()
+        if own_layout is not None:
+            own_layout.activate()
+        central = getattr(window, "centralWidget", lambda: None)()
+        if central is not None and central.layout() is not None:
+            central.layout().activate()
+            central.updateGeometry()
+        window.updateGeometry()
+        hint = window.sizeHint()
+        if target_height is not None:
+            window.resize(window.width(), target_height)
+        elif hint.isValid():
+            window.resize(max(window.width(), hint.width()), hint.height())
+        if retry:
+            # QMainWindow's minimum-size cache is updated one event after its
+            # central layout. A second queued resize is what permits shrinking
+            # all the way back to the pre-expansion height on Windows.
+            QTimer.singleShot(
+                0, lambda: self._fit_window_to_visible_content(target_height)
+            )
 
 
 def load_config() -> dict:
@@ -348,6 +388,7 @@ class Window(QMainWindow):
         main = QWidget()
         main_grid = self._parameter_grid(main)
         advanced = CollapsiblePanel("Advanced parameters")
+        self.advanced_panel = advanced
         advanced_grid = self._parameter_grid(advanced.content, left_margin=18)
         main_count = advanced_count = 0
         for spec in self.config.get("parameters", []):

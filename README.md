@@ -2,8 +2,8 @@
 
 CI Segmentation is a GPU-enabled Bilayers/BIOMERO workflow for instance
 segmentation from OME-Zarr to labeled OME-Zarr. It supports Cellpose 3,
-Cellpose-SAM, PyTorch StarDist, InstanSeg, and Spotiflow from one CUDA 12.6
-environment.
+Cellpose-SAM v2 and the original Cellpose-SAM, PyTorch StarDist, InstanSeg,
+and Spotiflow with optional local mask refinement from one CUDA 12.6 environment.
 
 ## Workflow contract
 
@@ -13,7 +13,9 @@ environment.
   QuPath 0.7.0, whose Bio-Formats image server rejects `uint32` tiles.
 - Benchmark output: **only** `benchmark_gallery_<image>.ome.zarr`.
 - Axes are normalized to `TCZYX`; time and Z are preserved in normal runs.
-- Spotiflow points become uniquely numbered single pixels or voxels.
+- Spotiflow points become uniquely numbered single pixels or voxels by default.
+  Advanced local refinement can replace 2D or slice-wise points with bounded,
+  locally thresholded instance masks.
 
 The internal `wrapper.py` is the container/Bilayers entrypoint. It is not
 packaged as an end-user CLI. `launcher.py` is the supported local frontend and
@@ -128,12 +130,16 @@ also requires a clean branch that is synchronized with its upstream.
 | StarDist NMS Threshold (`--stardist-nms-threshold`) | Allowed overlap during non-maximum suppression. `-1` loads `nms` from `thresholds.json`. |
 | Spotiflow Probability Threshold (`--spotiflow-prob-threshold`) | Spot acceptance threshold. `-1` uses the checkpoint default. |
 | Spotiflow Minimum Distance (`--spotiflow-min-distance`) | Minimum separation in µm, converted to pixels from the mean XY pixel size. |
+| Spotiflow Local Mask Refinement (`--spotiflow-local-refinement`) | Advanced checkbox, disabled by default. Lightly smooths the selected channel, estimates background and noise around every Spotiflow point, and grows only the seed-connected signal. Growth is bounded to a 1.0 µm radius, overlaps are assigned by local signal-to-noise score, and weak points remain single pixels. Native-3D Spotiflow requires Force slice-wise 2D. The former `--spotiflow-microsam-refinement` flag remains a hidden compatibility alias. |
+| Create Measurements Database (`--measurements-database`) | Advanced selector: `duckdb` (default), `sqlite`, or `skip`. Writes one database per top-level image or HCS screen containing final-object shape/location features, per-original-channel intensity statistics, and pairwise mask relationships. See the [measurements database reference](docs/measurements.md). |
 | Benchmark Gallery (`--benchmark`) | Advanced option. Processes the first deterministic image/field and first timepoint, runs all selectable models for every enabled step, then writes only a 2D XY OME-Zarr gallery. |
 
 `SD_Nuclei_Versatile` is automatically downsampled to 0.5 µm/px per XY axis
-when the source resolution is finer, and its labels are restored to the source
-grid with nearest-neighbor interpolation. The model is based on DSB2018 nuclei
-data described by the [official StarDist project](https://github.com/stardist/stardist),
+when the source resolution is finer. By default, its predicted polygons are
+rasterized directly on the source grid for smooth boundaries; the advanced
+toggle can restore the previous nearest-neighbor behavior. The model is based
+on DSB2018 nuclei data described by the
+[official StarDist project](https://github.com/stardist/stardist),
 and 0.5 µm/px matches the detection resolution in the
 [official QuPath StarDist example](https://qupath.readthedocs.io/en/latest/docs/deep/stardist.html).
 Other StarDist checkpoints retain their native input scale.
@@ -161,20 +167,31 @@ InstanSeg, or Spotiflow model without deserializing it or transferring it to
 the device again. Separate workflow invocations remain isolated.
 
 Each regular output records `model_cache_hits`, `model_cache_misses`, and a
-`timings` object in its root `cisegmentation` metadata. Plate outputs aggregate
-these values at the plate root while retaining per-field provenance. Timing
-fields are `startup_seconds`, `zarr_read_seconds`, `import_seconds`,
+`timings` object in its root `cisegmentation` metadata. Within one image
+timepoint, repeated segmentation requests with identical inference inputs reuse
+an independent copy of the first result. These are logged separately and
+recorded as `result_cache_hits`; they are not counted as model-cache hits.
+Plate outputs aggregate these values at the plate root while retaining
+per-field provenance. Timing fields are `startup_seconds`,
+`zarr_read_seconds`, `import_seconds`,
 `device_setup_seconds`, `model_load_seconds`, `inference_seconds`,
 `zarr_write_seconds`, and `total_seconds`. Benchmark run records contain their
 per-model import, load, inference, and cache information as well.
+Refined Spotiflow runs additionally record `spot_detection_seconds`,
+`local_refinement_seconds`, the physical/pixel radius, threshold policy, and
+the numbers of detected points, grown masks, single-pixel fallbacks, duplicate
+seeds, and removed overlap pixels.
 
 ## Models
 
 `tools/download_models.py` prepares an idempotent cache in the repository's
 Git-ignored `models/` folder containing all
-registered Cellpose 3 models, Cellpose-SAM, `SD_Nuclei_Versatile`,
+registered Cellpose 3 models, Cellpose-SAM v2, the original Cellpose-SAM,
+`SD_Nuclei_Versatile`,
 `SD_Foci_Aggregates`, `SD_Foci_Finn`, all three InstanSeg models, and all six
-Spotiflow models. The three StarDist source folders are bundled from the pinned
+Spotiflow models. Local Spotiflow mask refinement is deterministic CPU
+post-processing and requires no additional model checkpoint.
+The three StarDist source folders are bundled from the pinned
 `cistardist_pytorch` models and converted to PyTorch checkpoints only when the
 corresponding `.pt` file is missing.
 
@@ -185,11 +202,17 @@ conversion sources are likewise removed after the converted `.pt` checkpoint
 has loaded successfully. The completion inventory is written only after this
 cleanup, so interrupted or invalid caches are repaired on the next run.
 
+Cellpose-SAM v2 is the first Cellpose-SAM choice in the launcher. Cellpose
+documents it as reducing spurious masks in low-contrast regions. The original
+checkpoint remains selectable for reproducibility. Both checkpoints are about
+1.23 GB each, so v2 adds approximately 1.23 GB to the prepared model cache.
+
 The headless image removes Triton after installing the pinned PyTorch stack.
 Triton is used by `torch.compile`/Inductor, while this inference-only workflow
-uses eager PyTorch execution. GPU smoke tests cover Cellpose 3, Cellpose-SAM,
-StarDist, InstanSeg, and Spotiflow without it. The NVIDIA CUDA runtime packages
-remain installed because PyTorch 2.11 links against them directly, including
+uses eager PyTorch execution. GPU smoke tests cover Cellpose 3, both
+Cellpose-SAM versions, StarDist, InstanSeg, and Spotiflow without it. The
+NVIDIA CUDA runtime packages remain installed because PyTorch 2.11 links
+against them directly, including
 cuDNN, cuBLAS, cuFFT, cuRAND, cuSOLVER, cuSPARSE, cuSPARSELt, NCCL, NVSHMEM,
 CUPTI, NVJitLink, and cuFile.
 

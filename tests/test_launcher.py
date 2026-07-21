@@ -102,6 +102,30 @@ def test_launcher_defaults_to_only_step1_and_never_grays_controls():
     app.processEvents()
 
 
+def test_collapsing_advanced_parameters_restores_compact_window_height():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    window.show()
+    app.processEvents()
+    window.adjustSize()
+    app.processEvents()
+    collapsed_height = window.height()
+
+    window.advanced_panel.toggle.click()
+    app.processEvents()
+    app.processEvents()
+    expanded_height = window.height()
+    assert expanded_height > collapsed_height
+
+    window.advanced_panel.toggle.click()
+    app.processEvents()
+    app.processEvents()
+    assert window.height() == collapsed_height
+
+    window.close()
+    app.processEvents()
+
+
 def test_mouse_wheel_never_changes_parameter_values():
     app = QApplication.instance() or QApplication([])
     window = Window()

@@ -51,7 +51,18 @@ def _build_registry() -> dict[str, ModelSpec]:
     specs.extend(
         [
             ModelSpec(
-                "cellpose-sam:cpsam", "cellpose-sam", "cpsam", ("nuclei", "cells"), "3d"
+                "cellpose-sam:cpsam_v2",
+                "cellpose-sam",
+                "cpsam_v2",
+                ("nuclei", "cells"),
+                "3d",
+            ),
+            ModelSpec(
+                "cellpose-sam:cpsam",
+                "cellpose-sam",
+                "cpsam",
+                ("nuclei", "cells"),
+                "3d",
             ),
             ModelSpec(
                 "stardist:SD_Nuclei_Versatile",

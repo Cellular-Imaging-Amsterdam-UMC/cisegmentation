@@ -39,12 +39,18 @@ def output_timing_line(output) -> str | None:
     )
     hits = metadata.get("model_cache_hits")
     misses = metadata.get("model_cache_misses")
+    result_reuses = metadata.get("result_cache_hits")
     cache = (
         f" | cache-hits={int(hits)} | cache-misses={int(misses)}"
         if hits is not None and misses is not None
         else ""
     )
-    return f"Timing: {output.name} | {phases}{cache}"
+    reuse = (
+        f" | result-reuses={int(result_reuses)}"
+        if result_reuses is not None
+        else ""
+    )
+    return f"Timing: {output.name} | {phases}{cache}{reuse}"
 
 
 def _bool(value: str | bool) -> bool:
@@ -89,6 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
         "cell_nuclei_model": str,
         "cell_expansion_nucleus_model": str,
         "nucleus_step": _bool,
+        "spotiflow_microsam_refinement": _bool,
         **{f"foci_step_{slot}": _bool for slot in range(1, 5)},
     }
     for name, kind in legacy_types.items():
@@ -120,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         "cell_nuclei_model",
         "cell_expansion_nucleus_model",
         "nucleus_step",
+        "spotiflow_microsam_refinement",
         *(f"foci_step_{slot}" for slot in range(1, 5)),
     ):
         if hasattr(args, name):

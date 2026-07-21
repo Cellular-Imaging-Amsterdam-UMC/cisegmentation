@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+import math
 from pathlib import Path
 import time
 from dataclasses import replace
@@ -30,6 +32,52 @@ from .reporting import (
 from .settings import SKIP, SegmentationSettings
 
 
+_INFERENCE_CACHE_SETTING_NAMES = (
+    "model",
+    "target",
+    "primary_channel",
+    "nuclei_channel",
+    "device",
+    "dimension_mode",
+    "diameter",
+    "cellprob_threshold",
+    "flow_threshold",
+    "stardist_prob_threshold",
+    "stardist_nms_threshold",
+    "smooth_stardist_labels",
+    "spotiflow_prob_threshold",
+    "spotiflow_min_distance",
+    "spotiflow_local_refinement",
+)
+
+
+def _cache_value(value):
+    """Return a stable, hashable representation, including unknown scales."""
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
+        if math.isnan(value):
+            return "nan"
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+    return value
+
+
+def _inference_cache_key(spec, settings: SegmentationSettings, scales: dict) -> tuple:
+    """Describe every input that can affect one adapter invocation.
+
+    The source CZYX array is intentionally absent because each cache instance is
+    scoped to exactly one image timepoint.
+    """
+    setting_values = tuple(
+        _cache_value(getattr(settings, name))
+        for name in _INFERENCE_CACHE_SETTING_NAMES
+    )
+    scale_values = tuple(
+        sorted((str(name), _cache_value(value)) for name, value in scales.items())
+    )
+    return (spec.id, setting_values, scale_values)
+
+
 def _aggregate_timings(records: list[dict[str, float]]) -> dict[str, float]:
     keys = {
         "startup_seconds",
@@ -39,6 +87,13 @@ def _aggregate_timings(records: list[dict[str, float]]) -> dict[str, float]:
         "model_load_seconds",
         "inference_seconds",
     }
+    detail_keys = {
+        "spot_detection_seconds",
+        "local_refinement_seconds",
+    }
+    keys.update(
+        key for key in detail_keys if any(key in record for record in records)
+    )
     return {
         key: (
             max((float(record.get(key, 0.0)) for record in records), default=0.0)
@@ -210,8 +265,27 @@ def _run_reported_segmentation(
     step: str,
     timepoint: int,
     log: Callable[[str], None] | None,
+    result_cache: dict[tuple, tuple[np.ndarray, dict, str]],
 ) -> tuple[np.ndarray, dict, dict]:
-    labels, info = segment_czyx(czyx, spec, settings, scales)
+    cache_key = _inference_cache_key(spec, settings, scales)
+    cached = result_cache.get(cache_key)
+    if cached is None:
+        labels, info = segment_czyx(czyx, spec, settings, scales)
+        info = dict(info)
+        info["result_cache_hit"] = False
+        info["reused_from_step"] = None
+        result_cache[cache_key] = (labels.copy(), deepcopy(info), step)
+    else:
+        cached_labels, cached_info, source_step = cached
+        labels = cached_labels.copy()
+        info = deepcopy(cached_info)
+        info["runtime_seconds"] = 0.0
+        info["timings"] = {}
+        info["model_cache_hit"] = False
+        info["model_cache_hits"] = 0
+        info["model_cache_misses"] = 0
+        info["result_cache_hit"] = True
+        info["reused_from_step"] = source_step
     record = step_record(
         step=step,
         timepoint=timepoint,
@@ -252,6 +326,7 @@ def _segment_multistep_image(
     next_id = 0
     for time_index in range(image.data.shape[0]):
         czyx = image.data[time_index]
+        result_cache: dict[tuple, tuple[np.ndarray, dict, str]] = {}
         cell_labels = nucleus_labels = cell_step_nuclei = None
         if settings.cell_model != SKIP:
             expansion_model = settings.cell_expansion_model()
@@ -270,6 +345,7 @@ def _segment_multistep_image(
                     step="Step 1 expansion nuclei",
                     timepoint=time_index,
                     log=log,
+                    result_cache=result_cache,
                 )
                 infos.append(info)
                 step_runs.append(record)
@@ -294,6 +370,7 @@ def _segment_multistep_image(
                     step="Step 1 cells",
                     timepoint=time_index,
                     log=log,
+                    result_cache=result_cache,
                 )
                 infos.append(info)
                 step_runs.append(record)
@@ -312,6 +389,7 @@ def _segment_multistep_image(
                 step="Step 2 nuclei",
                 timepoint=time_index,
                 log=log,
+                result_cache=result_cache,
             )
             infos.append(info)
             step_runs.append(record)
@@ -365,6 +443,7 @@ def _segment_multistep_image(
                 step=f"Step 3{chr(96 + slot)} {spot_label}",
                 timepoint=time_index,
                 log=log,
+                result_cache=result_cache,
             )
             infos.append(info)
             step_runs.append(record)
@@ -380,6 +459,10 @@ def _segment_multistep_image(
                 {
                     "timepoint": time_index,
                     "channel": name,
+                    "locations_only": bool(
+                        name.startswith("labels_spots_channel_")
+                        and not settings.spotiflow_local_refinement
+                    ),
                     "label_statistics": statistics,
                 }
             )
@@ -388,7 +471,10 @@ def _segment_multistep_image(
                 f"    {name}: "
                 + format_label_statistics(
                     statistics,
-                    locations_only=name.startswith("labels_spots_channel_"),
+                    locations_only=(
+                        name.startswith("labels_spots_channel_")
+                        and not settings.spotiflow_local_refinement
+                    ),
                 ),
             )
         if not channel_labels:
@@ -416,9 +502,26 @@ def _segment_multistep_image(
                 float(info.get("runtime_seconds", 0.0)) for info in infos
             ),
             "object_count": int(np.count_nonzero(unique_ids)),
-            "model_cache_hits": sum(bool(info.get("model_cache_hit")) for info in infos),
+            "model_cache_hits": sum(
+                0
+                if bool(info.get("result_cache_hit"))
+                else int(
+                    info.get("model_cache_hits", bool(info.get("model_cache_hit")))
+                )
+                for info in infos
+            ),
             "model_cache_misses": sum(
-                not bool(info.get("model_cache_hit")) for info in infos
+                0
+                if bool(info.get("result_cache_hit"))
+                else int(
+                    info.get(
+                        "model_cache_misses", not bool(info.get("model_cache_hit"))
+                    )
+                )
+                for info in infos
+            ),
+            "result_cache_hits": sum(
+                bool(info.get("result_cache_hit")) for info in infos
             ),
             "timings": timings,
             "step_runs": step_runs,
@@ -481,11 +584,18 @@ def _segment_image(
             ),
             "object_count": int(tczyx.max(initial=0)),
             "model_cache_hits": sum(
-                bool(info.get("model_cache_hit")) for info in infos
+                int(info.get("model_cache_hits", bool(info.get("model_cache_hit"))))
+                for info in infos
             ),
             "model_cache_misses": sum(
-                not bool(info.get("model_cache_hit")) for info in infos
+                int(
+                    info.get(
+                        "model_cache_misses", not bool(info.get("model_cache_hit"))
+                    )
+                )
+                for info in infos
             ),
+            "result_cache_hits": 0,
             "timings": timings,
             "parameters": settings.to_dict(),
         },
@@ -569,4 +679,36 @@ def run_workflow(
             write_hcs_plate(results, output_path)
         emit(log, f"Finished output: {output_path}")
         outputs.append(output_path)
+        if settings.measurements_database != "skip":
+            from .measurements import (
+                measurement_database_path,
+                write_measurements_database,
+            )
+
+            database_path = measurement_database_path(
+                output_dir, source_name, settings.measurements_database
+            )
+            emit(
+                log,
+                f"Writing measurements database ({settings.measurements_database}): "
+                f"{database_path}",
+            )
+            measurement_summary = write_measurements_database(
+                results,
+                database_path,
+                settings.measurements_database,
+                output_ome_zarr=output_path,
+                log=log,
+            )
+            emit(
+                log,
+                "Finished measurements: "
+                f"images={measurement_summary['images']}, "
+                f"label sets={measurement_summary['label_sets']}, "
+                f"objects={measurement_summary['objects']}, "
+                f"intensity rows={measurement_summary['intensities']}, "
+                f"relationships={measurement_summary['relationships']}, "
+                f"runtime={measurement_summary['runtime_seconds']:.2f}s",
+            )
+            outputs.append(database_path)
     return outputs

@@ -99,14 +99,20 @@ def test_multistep_produces_compartment_and_independent_foci_channels(monkeypatc
         "labels_spots_channel_2",
         "labels_spots_channel_2",
     ]
-    assert calls == [("cells", 1), ("nuclei", 1), ("spots", 2), ("spots", 2)]
-    assert result.provenance["timings"]["inference_seconds"] == 1.2
+    assert calls == [("cells", 1), ("nuclei", 1), ("spots", 2)]
+    assert result.provenance["timings"]["inference_seconds"] == pytest.approx(0.9)
     assert result.provenance["timings"]["startup_seconds"] == 0.4
+    assert result.provenance["result_cache_hits"] == 1
     assert len(result.provenance["step_runs"]) == 4
+    assert result.provenance["step_runs"][-1]["result_cache_hit"] is True
+    assert result.provenance["step_runs"][-1]["model_cache_hit"] is False
+    assert result.provenance["step_runs"][-1]["reused_from_step"] == "Step 3a spots"
     assert len(result.provenance["output_statistics"]) == 5
+    assert result.labels[0, 3, 0, 1, 1] != result.labels[0, 4, 0, 1, 1]
     assert any("device=CPU" in line for line in log)
     assert any("labels=" in line for line in log)
     assert any("Post-processing" in line for line in log)
+    assert any("result reused from Step 3a spots" in line for line in log)
 
 
 @pytest.mark.parametrize(
@@ -278,6 +284,183 @@ def test_expansion_and_duplicate_step2_model_both_run(monkeypatch):
         "labels_nuclei",
         "labels_cytoplasm",
     ]
+
+
+def test_expansion_and_identical_step2_reuse_result(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((1, 1, 1, 5, 5), dtype=np.uint8),
+        scales={"x": 0.5, "y": 0.5},
+    )
+    calls = []
+
+    def fake_segment(czyx, spec, settings, scales):
+        calls.append((spec.id, settings.target, settings.primary_channel))
+        labels = np.zeros((1, 5, 5), dtype=np.uint32)
+        labels[0, 2, 2] = 4
+        return labels, {
+            "device": "cpu",
+            "runtime_seconds": 0.25,
+            "model_cache_hit": False,
+            "effective_parameters": {
+                "adapter": "cellpose",
+                "diameter_pixels": 24.0,
+                "diameter_um": 12.0,
+                "diameter_source": "automatic target default",
+                "cellprob_threshold": 0.0,
+                "flow_threshold": 0.4,
+            },
+            "timings": {"inference_seconds": 0.25},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    log = []
+    result = engine._segment_multistep_image(
+        image,
+        SegmentationSettings(
+            cell_model="expand:cellpose3:nuclei",
+            cell_nuclei_channel=1,
+            nucleus_model="cellpose3:nuclei",
+            nucleus_channel=1,
+            remove_border_cells=False,
+        ),
+        log=log.append,
+    )
+
+    assert calls == [("cellpose3:nuclei", "nuclei", 1)]
+    assert result.provenance["result_cache_hits"] == 1
+    assert result.provenance["model_cache_hits"] == 0
+    assert result.provenance["model_cache_misses"] == 1
+    assert result.provenance["timings"]["inference_seconds"] == 0.25
+    assert result.provenance["step_runs"][1]["reused_from_step"] == (
+        "Step 1 expansion nuclei"
+    )
+    assert result.provenance["step_runs"][1]["effective_parameters"] == (
+        result.provenance["step_runs"][0]["effective_parameters"]
+    )
+    assert any("result reused from Step 1 expansion nuclei" in line for line in log)
+
+
+def test_result_reuse_is_scoped_to_one_timepoint(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((2, 1, 1, 5, 5), dtype=np.uint8),
+        scales={"x": 0.5, "y": 0.5},
+    )
+    calls = 0
+
+    def fake_segment(czyx, spec, settings, scales):
+        nonlocal calls
+        calls += 1
+        return np.zeros((1, 5, 5), dtype=np.uint32), {
+            "device": "cpu",
+            "runtime_seconds": 0.1,
+            "model_cache_hit": calls > 1,
+            "timings": {"inference_seconds": 0.1},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    result = engine._segment_multistep_image(
+        image,
+        SegmentationSettings(
+            cell_model="skip",
+            nucleus_model="skip",
+            foci_model_1="spotiflow:general",
+            foci_model_2="spotiflow:general",
+        ),
+    )
+
+    assert calls == 2
+    assert result.provenance["result_cache_hits"] == 2
+    assert result.provenance["model_cache_hits"] == 1
+    assert result.provenance["model_cache_misses"] == 1
+
+
+def test_inference_cache_key_includes_settings_and_scales():
+    spec = engine.get_model_spec("stardist:SD_Nuclei_Versatile")
+    settings = SegmentationSettings(
+        model=spec.id,
+        target="nuclei",
+        stardist_prob_threshold=0.4,
+    )
+    base = engine._inference_cache_key(spec, settings, {"x": 0.5, "y": 0.5})
+
+    assert base != engine._inference_cache_key(
+        spec,
+        SegmentationSettings(
+            model=spec.id,
+            target="nuclei",
+            stardist_prob_threshold=0.6,
+        ),
+        {"x": 0.5, "y": 0.5},
+    )
+    assert base != engine._inference_cache_key(
+        spec, settings, {"x": 0.25, "y": 0.5}
+    )
+
+    spot_spec = engine.get_model_spec("spotiflow:general")
+    point_settings = SegmentationSettings(model=spot_spec.id, target="spots")
+    assert engine._inference_cache_key(
+        spot_spec, point_settings, {"x": 0.5, "y": 0.5}
+    ) != engine._inference_cache_key(
+        spot_spec,
+        SegmentationSettings(
+            model=spot_spec.id,
+            target="spots",
+            spotiflow_local_refinement=True,
+        ),
+        {"x": 0.5, "y": 0.5},
+    )
+
+
+def test_cached_labels_are_copied_and_failed_inference_is_not_cached(monkeypatch):
+    spec = engine.get_model_spec("spotiflow:general")
+    settings = SegmentationSettings(
+        model=spec.id,
+        target="spots",
+        cell_model="skip",
+        foci_model_1=spec.id,
+    )
+    cache = {}
+    calls = 0
+
+    def fake_segment(czyx, model_spec, step_settings, scales):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("inference failed")
+        labels = np.zeros((1, 3, 3), dtype=np.uint32)
+        labels[0, 1, 1] = 7
+        return labels, {
+            "device": "cpu",
+            "runtime_seconds": 0.1,
+            "model_cache_hit": False,
+            "timings": {"inference_seconds": 0.1},
+        }
+
+    monkeypatch.setattr(engine, "segment_czyx", fake_segment)
+    kwargs = {
+        "step": "Step 3a spots",
+        "timepoint": 0,
+        "log": None,
+        "result_cache": cache,
+    }
+    czyx = np.zeros((1, 1, 3, 3), dtype=np.uint8)
+    with pytest.raises(RuntimeError, match="inference failed"):
+        engine._run_reported_segmentation(
+            czyx, spec, settings, {"x": 1.0, "y": 1.0}, **kwargs
+        )
+    assert cache == {}
+
+    first, _, _ = engine._run_reported_segmentation(
+        czyx, spec, settings, {"x": 1.0, "y": 1.0}, **kwargs
+    )
+    first[0, 1, 1] = 99
+    second, info, _ = engine._run_reported_segmentation(
+        czyx, spec, settings, {"x": 1.0, "y": 1.0}, **kwargs
+    )
+
+    assert calls == 2
+    assert second[0, 1, 1] == 7
+    assert info["result_cache_hit"] is True
 
 
 @pytest.mark.parametrize(

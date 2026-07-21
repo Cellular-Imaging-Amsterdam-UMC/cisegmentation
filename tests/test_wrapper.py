@@ -15,6 +15,7 @@ def test_output_timing_line_reads_root_provenance(tmp_path):
                     "timings": timings,
                     "model_cache_hits": 3,
                     "model_cache_misses": 1,
+                    "result_cache_hits": 2,
                 }
             }
         ),
@@ -27,6 +28,7 @@ def test_output_timing_line_reads_root_provenance(tmp_path):
     assert "inference=0.50s" in line
     assert "total=0.70s" in line
     assert "cache-hits=3 | cache-misses=1" in line
+    assert "result-reuses=2" in line
 
 
 def test_success_message_is_last_and_contains_elapsed_time(monkeypatch, capsys):

@@ -91,6 +91,14 @@ def test_workflow_report_lists_selected_steps_and_tuning():
     assert "requested device=auto" in report
     assert "output: labels as image channels" in report
     assert "effective model parameters are reported" in report
+    assert "Spotiflow output: single-pixel point locations" in report
+
+    refined_report = "\n".join(
+        workflow_report_lines(
+            SegmentationSettings(spotiflow_local_refinement=True)
+        )
+    )
+    assert "bounded local intensity instance masks" in refined_report
 
     native_report = "\n".join(
         workflow_report_lines(SegmentationSettings(write_ome_zarr_labels=True))
@@ -110,6 +118,30 @@ def test_effective_parameters_report_model_defaults_and_stardist_rescaling():
     )
     assert "probability=0.5 (checkpoint thresholds.yaml)" in spotiflow
     assert "minimum distance=4 px / 2.000 um" in spotiflow
+
+    refined = format_effective_parameters(
+        {
+            "adapter": "spotiflow",
+            "probability_threshold": 0.5,
+            "probability_source": "checkpoint thresholds.yaml",
+            "minimum_distance_pixels": 4,
+            "minimum_distance_um": 2.0,
+            "local_refinement": True,
+            "refinement_max_radius_um": 1.0,
+            "refinement_radius_y_pixels": 4.0,
+            "refinement_radius_x_pixels": 5.0,
+            "refinement_noise_sigmas": 3.0,
+            "refinement_threshold_fraction": 0.3,
+            "detected_points": 12,
+            "refined_masks": 10,
+            "grown_masks": 8,
+            "single_pixel_fallbacks": 2,
+            "suppressed_duplicate_seeds": 2,
+            "overlap_pixels_removed": 4,
+        }
+    )
+    assert "local mask refinement=bounded intensity growth" in refined
+    assert "points=12, masks=10, grown=8" in refined
 
     stardist = format_effective_parameters(
         {

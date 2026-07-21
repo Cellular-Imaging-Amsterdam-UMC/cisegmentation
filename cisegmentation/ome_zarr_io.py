@@ -62,6 +62,10 @@ _PHASE_TIMING_KEYS = (
     "inference_seconds",
     "zarr_write_seconds",
 )
+_DETAIL_TIMING_KEYS = (
+    "spot_detection_seconds",
+    "local_refinement_seconds",
+)
 
 
 def _finalize_timings(
@@ -70,6 +74,13 @@ def _finalize_timings(
     result = {
         key: float((timings or {}).get(key, 0.0)) for key in _PHASE_TIMING_KEYS
     }
+    result.update(
+        {
+            key: float((timings or {}).get(key, 0.0))
+            for key in _DETAIL_TIMING_KEYS
+            if key in (timings or {})
+        }
+    )
     result["zarr_write_seconds"] = float(zarr_write_seconds)
     result["total_seconds"] = sum(result[key] for key in _PHASE_TIMING_KEYS)
     return result
@@ -799,14 +810,21 @@ def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> 
             "wells": [{"path": path} for path in sorted(wells)],
         }
     timing_records = [result.provenance.get("timings", {}) for result in result_list]
+    aggregate_keys = [
+        key for key in _PHASE_TIMING_KEYS if key != "zarr_write_seconds"
+    ]
+    aggregate_keys.extend(
+        key
+        for key in _DETAIL_TIMING_KEYS
+        if any(key in record for record in timing_records)
+    )
     aggregated = {
         key: (
             max((float(record.get(key, 0.0)) for record in timing_records), default=0.0)
             if key == "startup_seconds"
             else sum(float(record.get(key, 0.0)) for record in timing_records)
         )
-        for key in _PHASE_TIMING_KEYS
-        if key != "zarr_write_seconds"
+        for key in aggregate_keys
     }
     root.attrs["cisegmentation"] = {
         "model": result_list[0].model_id,
@@ -819,6 +837,10 @@ def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> 
         ),
         "model_cache_misses": sum(
             int(result.provenance.get("model_cache_misses", 0))
+            for result in result_list
+        ),
+        "result_cache_hits": sum(
+            int(result.provenance.get("result_cache_hits", 0))
             for result in result_list
         ),
         "timings": aggregated,

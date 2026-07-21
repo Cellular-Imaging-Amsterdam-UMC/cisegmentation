@@ -13,7 +13,7 @@ import urllib.request
 import zipfile
 
 
-CACHE_SCHEMA = 3
+CACHE_SCHEMA = 5
 CP3_MODELS = (
     "cyto3",
     "nuclei",
@@ -199,9 +199,11 @@ def _download_cellpose(root: Path) -> dict:
         cp3.size_model_path(name)
     from cellpose import models as cp4
 
-    cp4.CellposeModel(gpu=False, pretrained_model="cpsam")
+    for name in ("cpsam_v2", "cpsam"):
+        cp4.CellposeModel(gpu=False, pretrained_model=name)
     return {
         "cellpose3_files": len(list(legacy.glob("*"))),
+        "cpsam_v2": (sam / "cpsam_v2").stat().st_size,
         "cpsam": (sam / "cpsam").stat().st_size,
     }
 

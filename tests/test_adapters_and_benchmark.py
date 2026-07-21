@@ -1,3 +1,6 @@
+import sys
+from types import ModuleType, SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -12,9 +15,16 @@ from cisegmentation.adapters import (
     _stardist_versatile_input,
     clear_model_cache,
     points_to_labels,
+    segment_czyx,
 )
 from cisegmentation.registry import get_model_spec
-from cisegmentation.benchmark import _benchmark_cases, center_crop, run_benchmark
+from cisegmentation.benchmark import (
+    BenchmarkCase,
+    _benchmark_cases,
+    _gallery,
+    center_crop,
+    run_benchmark,
+)
 from cisegmentation.ome_zarr_io import enumerate_resources, read_image
 from cisegmentation.settings import SegmentationSettings
 
@@ -53,6 +63,43 @@ def test_process_model_cache_is_keyed_by_model_and_device():
     }
     assert not cpu_timing["model_cache_hit"]
     clear_model_cache()
+
+
+def test_cellpose_sam_v2_uses_existing_cellpose_adapter(monkeypatch):
+    constructed = []
+
+    class FakeModel:
+        diam_mean = 30.0
+
+        def __init__(self, *, gpu, pretrained_model):
+            constructed.append((gpu, pretrained_model))
+
+        def eval(self, image, **kwargs):
+            return np.zeros(image.shape[:2], dtype=np.uint32), None, None
+
+    module = ModuleType("cellpose")
+    module.models = SimpleNamespace(CellposeModel=FakeModel)
+    monkeypatch.setitem(sys.modules, "cellpose", module)
+    clear_model_cache()
+    try:
+        labels, info = segment_czyx(
+            np.zeros((1, 1, 8, 9), dtype=np.uint16),
+            get_model_spec("cellpose-sam:cpsam_v2"),
+            SegmentationSettings(
+                model="cellpose-sam:cpsam_v2",
+                target="nuclei",
+                primary_channel=1,
+                device="cpu",
+            ),
+            {"x": 0.5, "y": 0.5},
+        )
+    finally:
+        clear_model_cache()
+
+    assert constructed == [(False, "cpsam_v2")]
+    assert labels.shape == (1, 8, 9)
+    assert labels.dtype == np.uint32
+    assert info["effective_parameters"]["adapter"] == "cellpose"
 
 
 def test_torch_runtime_suppresses_only_irrelevant_triton_warning():
@@ -190,6 +237,41 @@ def test_center_crop_is_centered_and_at_most_1024():
     assert info == {"x": 38, "y": 138, "width": 1024, "height": 1024}
 
 
+def test_benchmark_renders_refined_spotiflow_as_masks(monkeypatch):
+    import cisegmentation.benchmark as benchmark
+    from PIL import Image
+
+    case = BenchmarkCase(
+        key="spot",
+        step="Step 3a foci",
+        spec=get_model_spec("spotiflow:general"),
+        target="spots",
+        primary_channel=1,
+    )
+    rendered_as_points = []
+
+    def fake_overlay(_raw, _labels, width, height, spots):
+        rendered_as_points.append(spots)
+        return Image.new("RGB", (width, height))
+
+    monkeypatch.setattr(benchmark, "_label_overlay", fake_overlay)
+    _gallery(
+        [case],
+        {case.key: np.zeros((8, 8), dtype=np.uint8)},
+        [
+            {
+                "case": case.key,
+                "status": "success",
+                "locations_only": False,
+                "object_count": 1,
+                "runtime_seconds": 0.1,
+            }
+        ],
+        {case.key: np.ones((1, 8, 8), dtype=np.uint32)},
+    )
+    assert rendered_as_points == [False]
+
+
 def test_instanseg_requires_metadata_pixel_size():
     with np.testing.assert_raises_regex(ValueError, "OME-Zarr metadata"):
         _segment_instanseg(
@@ -234,7 +316,7 @@ def test_benchmark_writes_only_one_multichannel_ome_zarr(
         "2d-xy-input-and-segmentation-panels"
     )
     runs = root.attrs["cisegmentation"]["runs"]
-    assert len(runs) == 5
+    assert len(runs) == 6
     assert {run["step"] for run in runs} == {"Step 2 nuclei"}
     assert {run["target"] for run in runs} == {"nuclei"}
 
@@ -246,7 +328,7 @@ def test_benchmark_uses_every_model_offered_for_enabled_steps():
         foci_channel_2=2,
     )
     cases = _benchmark_cases(settings)
-    assert len(cases) == 3 + 10
+    assert len(cases) == 4 + 10
     assert {case.step for case in cases} == {
         "Step 1 cells",
         "Step 3b foci",
@@ -258,6 +340,8 @@ def test_benchmark_uses_every_model_offered_for_enabled_steps():
         "cellpose3",
     }
     assert {case.primary_channel for case in foci} == {2}
+    cell_ids = {case.spec.id for case in cases if case.step == "Step 1 cells"}
+    assert {"cellpose-sam:cpsam_v2", "cellpose-sam:cpsam"} <= cell_ids
 
 
 def test_expansion_benchmark_uses_all_selectable_seed_models():
@@ -268,7 +352,10 @@ def test_expansion_benchmark_uses_all_selectable_seed_models():
             cell_nuclei_channel=1,
         )
     )
-    assert len(cases) == 4
+    assert len(cases) == 5
     assert {case.step for case in cases} == {"Step 1 expansion nuclei"}
     assert {case.target for case in cases} == {"nuclei"}
     assert {case.primary_channel for case in cases} == {1}
+    assert {"cellpose-sam:cpsam_v2", "cellpose-sam:cpsam"} <= {
+        case.spec.id for case in cases
+    }
