@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -421,8 +422,11 @@ class Window(QMainWindow):
         restore = QPushButton("Restore settings")
         restore.clicked.connect(self.restore)
         buttons.addWidget(restore)
+        load = QPushButton("Load settings")
+        load.clicked.connect(self.load)
+        buttons.addWidget(load)
         save = QPushButton("Save settings")
-        save.clicked.connect(self.save)
+        save.clicked.connect(self.save_as)
         buttons.addWidget(save)
         buttons.addStretch()
         run_local = QPushButton("Run Locally")
@@ -607,24 +611,64 @@ class Window(QMainWindow):
         for button in self.run_buttons:
             button.setEnabled(True)
 
-    def save(self) -> None:
-        SETTINGS.write_text(
-            json.dumps(
-                {
-                    "values": self.values(),
-                    "input": self.input_path.text(),
-                    "output": self.output_path.text(),
-                    "gpu": self.gpu.isChecked(),
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+    def save(self, path: str | Path | None = None) -> None:
+        destination = Path(path) if path is not None else SETTINGS
+        destination.write_text(
+            json.dumps(self._settings_data(), indent=2), encoding="utf-8"
         )
+
+    def save_as(self) -> None:
+        selected, _filter = QFileDialog.getSaveFileName(
+            self,
+            "Save settings",
+            str(ROOT / "cisegmentation-settings.json"),
+            "JSON settings (*.json);;All files (*)",
+        )
+        if not selected:
+            return
+        path = Path(selected)
+        if not path.suffix:
+            path = path.with_suffix(".json")
+        try:
+            self.save(path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Could not save settings", str(exc))
+
+    def load(self) -> None:
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Load settings",
+            str(ROOT),
+            "JSON settings (*.json);;All files (*)",
+        )
+        if selected:
+            self._load_settings(Path(selected), show_errors=True)
 
     def restore(self) -> None:
         if not SETTINGS.exists():
             return
-        data = json.loads(SETTINGS.read_text(encoding="utf-8"))
+        self._load_settings(SETTINGS, show_errors=True)
+
+    def _settings_data(self) -> dict:
+        return {
+            "values": self.values(),
+            "input": self.input_path.text(),
+            "output": self.output_path.text(),
+            "gpu": self.gpu.isChecked(),
+        }
+
+    def _load_settings(self, path: Path, *, show_errors: bool = False) -> None:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("The settings file must contain a JSON object.")
+        except (OSError, ValueError) as exc:
+            if show_errors:
+                QMessageBox.critical(self, "Could not load settings", str(exc))
+            return
+        self._apply_settings(data)
+
+    def _apply_settings(self, data: dict) -> None:
         self.input_path.setText(data.get("input", ""))
         self.output_path.setText(data.get("output", ""))
         self.gpu.setChecked(data.get("gpu", True))

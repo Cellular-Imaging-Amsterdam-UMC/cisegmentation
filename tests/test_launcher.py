@@ -74,7 +74,7 @@ def test_launcher_exposes_both_run_buttons():
     app = QApplication.instance() or QApplication([])
     window = Window()
     labels = {button.text() for button in window.findChildren(QPushButton)}
-    assert {"Run Docker", "Run Locally"} <= labels
+    assert {"Run Docker", "Run Locally", "Load settings"} <= labels
     assert "Docker:" in window.preview.toPlainText()
     assert "Local Python:" in window.preview.toPlainText()
     window.close()
@@ -187,5 +187,40 @@ def test_launcher_restore_migrates_legacy_settings(tmp_path, monkeypatch):
     assert window.widgets["cell_model"].currentData() == "skip"
     assert window.widgets["nucleus_model"].currentData() == "skip"
     assert window.widgets["foci_model_1"].currentData() == "stardist:SD_Foci_Finn"
+    window.close()
+    app.processEvents()
+
+
+def test_launcher_saves_and_loads_named_settings(tmp_path, monkeypatch):
+    settings_file = tmp_path / "named-settings.json"
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    window.input_path.setText("input-from-saved-settings")
+    window.output_path.setText("output-from-saved-settings")
+    window.gpu.setChecked(False)
+    window.widgets["cell_channel"].setValue(3)
+
+    monkeypatch.setattr(
+        launcher.QFileDialog,
+        "getSaveFileName",
+        lambda *_args: (str(settings_file), "JSON settings (*.json)"),
+    )
+    window.save_as()
+
+    window.input_path.setText("changed-input")
+    window.output_path.setText("changed-output")
+    window.gpu.setChecked(True)
+    window.widgets["cell_channel"].setValue(1)
+    monkeypatch.setattr(
+        launcher.QFileDialog,
+        "getOpenFileName",
+        lambda *_args: (str(settings_file), "JSON settings (*.json)"),
+    )
+    window.load()
+
+    assert window.input_path.text() == "input-from-saved-settings"
+    assert window.output_path.text() == "output-from-saved-settings"
+    assert not window.gpu.isChecked()
+    assert window.widgets["cell_channel"].value() == 3
     window.close()
     app.processEvents()
