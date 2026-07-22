@@ -768,86 +768,168 @@ def write_rgb_gallery(
     return output_path
 
 
-def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> Path:
-    import zarr
+class HCSPlateWriter:
+    """Incrementally write one completed segmentation field at a time."""
 
-    write_started = time.perf_counter()
-    result_list = list(results)
-    if not result_list:
-        raise ValueError("Cannot write an empty HCS result")
-    output_path = Path(output_path)
-    temporary = output_path.with_name(output_path.name + ".partial")
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    root = zarr.open_group(str(temporary), mode="w", zarr_version=2)
-    source_plate = result_list[0].source.resource.plate_attrs or {}
-    root.attrs.update(
-        {key: value for key, value in source_plate.items() if key != "omero"}
-    )
-    wells: dict[str, list[str]] = {}
-    for result in result_list:
-        row, column, field = result.source.resource.plate_path or ("A", "1", "0")
-        well_path = f"{row}/{column}"
-        wells.setdefault(well_path, []).append(field)
-        group = root.require_group(f"{well_path}/{field}")
+    def __init__(
+        self,
+        resources: Iterable[ImageResource],
+        output_path: str | Path,
+    ) -> None:
+        import zarr
+
+        self.resources = list(resources)
+        if not self.resources:
+            raise ValueError("Cannot write an empty HCS result")
+        if any(resource.plate_path is None for resource in self.resources):
+            raise ValueError("Every HCS resource must have a plate field path")
+        self.output_path = Path(output_path)
+        self.temporary = self.output_path.with_name(self.output_path.name + ".partial")
+        if self.temporary.exists():
+            shutil.rmtree(self.temporary)
+        self.root = zarr.open_group(str(self.temporary), mode="w", zarr_version=2)
+        source_plate = self.resources[0].plate_attrs or {}
+        self.root.attrs.update(
+            {key: value for key, value in source_plate.items() if key != "omero"}
+        )
+        self.wells: dict[str, list[str]] = {}
+        for resource in self.resources:
+            row, column, field = resource.plate_path  # type: ignore[misc]
+            self.wells.setdefault(f"{row}/{column}", []).append(field)
+        for well_path, fields in self.wells.items():
+            well = self.root.require_group(well_path)
+            well.attrs["well"] = {
+                "images": [
+                    {"path": field, "acquisition": 0} for field in sorted(fields)
+                ],
+                "version": "0.4",
+            }
+        if "plate" not in self.root.attrs:
+            self.root.attrs["plate"] = {
+                "version": "0.4",
+                "rows": [],
+                "columns": [],
+                "wells": [{"path": path} for path in sorted(self.wells)],
+            }
+        self._expected_paths = {
+            "/".join(resource.plate_path or ()) for resource in self.resources
+        }
+        self._written_paths: set[str] = set()
+        self._model_id: str | None = None
+        self._target: str | None = None
+        self._source_name: str | None = None
+        self._timing_records: list[dict[str, Any]] = []
+        self._model_cache_hits = 0
+        self._model_cache_misses = 0
+        self._result_cache_hits = 0
+        self._write_seconds = 0.0
+        self._closed = False
+
+    def append(self, result: LabelResult) -> None:
+        if self._closed:
+            raise RuntimeError("Cannot append to a closed HCS plate writer")
+        plate_path = result.source.resource.plate_path
+        if plate_path is None:
+            raise ValueError("HCS result is missing its plate field path")
+        resource_path = "/".join(plate_path)
+        if resource_path not in self._expected_paths:
+            raise ValueError(f"Unexpected HCS field: {resource_path}")
+        if resource_path in self._written_paths:
+            raise ValueError(f"HCS field was written more than once: {resource_path}")
+        row, column, field = plate_path
+        group = self.root.require_group(resource_path)
         writer = (
             _write_native_ome_zarr_labels
             if result.write_ome_zarr_labels
             else _write_image_group
         )
-        writer(group, result, f"{output_path.stem}_{row}_{column}_{field}")
-    for well_path, fields in wells.items():
-        well = root.require_group(well_path)
-        well.attrs["well"] = {
-            "images": [{"path": field, "acquisition": 0} for field in sorted(fields)],
-            "version": "0.4",
-        }
-    if "plate" not in root.attrs:
-        root.attrs["plate"] = {
-            "version": "0.4",
-            "rows": [],
-            "columns": [],
-            "wells": [{"path": path} for path in sorted(wells)],
-        }
-    timing_records = [result.provenance.get("timings", {}) for result in result_list]
-    aggregate_keys = [
-        key for key in _PHASE_TIMING_KEYS if key != "zarr_write_seconds"
-    ]
-    aggregate_keys.extend(
-        key
-        for key in _DETAIL_TIMING_KEYS
-        if any(key in record for record in timing_records)
-    )
-    aggregated = {
-        key: (
-            max((float(record.get(key, 0.0)) for record in timing_records), default=0.0)
-            if key == "startup_seconds"
-            else sum(float(record.get(key, 0.0)) for record in timing_records)
+        write_started = time.perf_counter()
+        writer(
+            group,
+            result,
+            f"{self.output_path.stem}_{row}_{column}_{field}",
         )
-        for key in aggregate_keys
-    }
-    root.attrs["cisegmentation"] = {
-        "model": result_list[0].model_id,
-        "target": result_list[0].target,
-        "source": result_list[0].source.resource.store_path.name,
-        "field_count": len(result_list),
-        "model_cache_hits": sum(
-            int(result.provenance.get("model_cache_hits", 0))
-            for result in result_list
-        ),
-        "model_cache_misses": sum(
-            int(result.provenance.get("model_cache_misses", 0))
-            for result in result_list
-        ),
-        "result_cache_hits": sum(
-            int(result.provenance.get("result_cache_hits", 0))
-            for result in result_list
-        ),
-        "timings": aggregated,
-    }
-    _set_write_timing(root, write_started)
-    root.store.close()
-    if output_path.exists():
-        shutil.rmtree(output_path)
-    _install_store(temporary, output_path)
-    return output_path
+        _set_write_timing(group, write_started)
+        self._write_seconds += time.perf_counter() - write_started
+        self._written_paths.add(resource_path)
+        if self._model_id is None:
+            self._model_id = result.model_id
+            self._target = result.target
+            self._source_name = result.source.resource.store_path.name
+        self._timing_records.append(dict(result.provenance.get("timings", {})))
+        self._model_cache_hits += int(result.provenance.get("model_cache_hits", 0))
+        self._model_cache_misses += int(
+            result.provenance.get("model_cache_misses", 0)
+        )
+        self._result_cache_hits += int(result.provenance.get("result_cache_hits", 0))
+
+    def finalize(self) -> Path:
+        if self._closed:
+            raise RuntimeError("HCS plate writer is already closed")
+        missing = self._expected_paths - self._written_paths
+        if missing:
+            raise ValueError(
+                "Cannot finalize HCS output; fields were not written: "
+                + ", ".join(sorted(missing))
+            )
+        if self._model_id is None or self._target is None or self._source_name is None:
+            raise ValueError("Cannot write an empty HCS result")
+        timing_records = self._timing_records
+        aggregate_keys = [
+            key for key in _PHASE_TIMING_KEYS if key != "zarr_write_seconds"
+        ]
+        aggregate_keys.extend(
+            key
+            for key in _DETAIL_TIMING_KEYS
+            if any(key in record for record in timing_records)
+        )
+        aggregated = {
+            key: (
+                max(
+                    (float(record.get(key, 0.0)) for record in timing_records),
+                    default=0.0,
+                )
+                if key == "startup_seconds"
+                else sum(float(record.get(key, 0.0)) for record in timing_records)
+            )
+            for key in aggregate_keys
+        }
+        self.root.attrs["cisegmentation"] = {
+            "model": self._model_id,
+            "target": self._target,
+            "source": self._source_name,
+            "field_count": len(self._written_paths),
+            "model_cache_hits": self._model_cache_hits,
+            "model_cache_misses": self._model_cache_misses,
+            "result_cache_hits": self._result_cache_hits,
+            "timings": _finalize_timings(aggregated, self._write_seconds),
+        }
+        self.root.store.close()
+        self._closed = True
+        if self.output_path.exists():
+            shutil.rmtree(self.output_path)
+        _install_store(self.temporary, self.output_path)
+        return self.output_path
+
+    def abort(self) -> None:
+        if not self._closed:
+            self.root.store.close()
+            self._closed = True
+        if self.temporary.exists():
+            shutil.rmtree(self.temporary)
+
+
+def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> Path:
+    result_list = list(results)
+    if not result_list:
+        raise ValueError("Cannot write an empty HCS result")
+    writer = HCSPlateWriter(
+        [result.source.resource for result in result_list], output_path
+    )
+    try:
+        for result in result_list:
+            writer.append(result)
+        return writer.finalize()
+    except Exception:
+        writer.abort()
+        raise

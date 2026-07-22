@@ -13,9 +13,15 @@ from cisegmentation.settings import (
 from wrapper import build_parser
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 def test_bilayers_config_is_structurally_valid():
     config = load_config()
     assert validate_config(config) == []
+    assert config["docker_image"]["tag"] == (ROOT / "version.txt").read_text(
+        encoding="utf-8"
+    ).strip()
     parameters = {item["name"]: item for item in config["parameters"]}
     assert "instanseg_pixel_size_um" not in parameters
     assert "input_channels" not in parameters
@@ -57,6 +63,9 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["write_ome_zarr_labels"]["default"] is False
     assert parameters["write_ome_zarr_labels"]["mode"] == "advanced"
     assert parameters["write_ome_zarr_labels"]["section_id"] == "advanced"
+    assert parameters["labels_log_info"]["default"] is False
+    assert parameters["labels_log_info"]["mode"] == "advanced"
+    assert parameters["labels_log_info"]["section_id"] == "advanced"
     assert parameters["smooth_stardist_labels"]["default"] is True
     assert parameters["smooth_stardist_labels"]["mode"] == "advanced"
     assert parameters["remove_border_cells"]["default"] is True

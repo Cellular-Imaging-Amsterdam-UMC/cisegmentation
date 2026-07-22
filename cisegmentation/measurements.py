@@ -711,7 +711,9 @@ def write_measurements_database(
                 json.dumps(settings, sort_keys=True),
             )],
         )
-        for result in chain((first,), result_iterator):
+        all_results = chain((first,), result_iterator)
+        first = None
+        for result in all_results:
             next_image_id += 1
             image_id = next_image_id
             source = result.source

@@ -117,8 +117,9 @@ def step_record(
     labels: np.ndarray,
     info: dict[str, Any],
     scales: dict[str, float],
+    include_label_statistics: bool = True,
 ) -> dict[str, Any]:
-    return {
+    record = {
         "step": step,
         "timepoint": int(timepoint),
         "model": model,
@@ -143,8 +144,10 @@ def step_record(
             key: float(value) for key, value in info.get("timings", {}).items()
         },
         "effective_parameters": dict(info.get("effective_parameters", {})),
-        "label_statistics": label_statistics(labels, scales),
     }
+    if include_label_statistics:
+        record["label_statistics"] = label_statistics(labels, scales)
+    return record
 
 
 def format_effective_parameters(parameters: dict[str, Any]) -> str | None:
@@ -235,11 +238,14 @@ def format_step_record(record: dict[str, Any]) -> list[str]:
         f"  {record['step']} | T{record['timepoint'] + 1} | {record['model']} | {channels}",
         f"    device={device}, mode={record.get('dimension_mode') or 'unknown'}, "
         f"runtime={record['runtime_seconds']:.2f}s, {cache}",
-        f"    {format_label_statistics(record['label_statistics'], locations_only=record.get('locations_only', record.get('target') == 'spots'))}",
     ]
     effective = format_effective_parameters(record.get("effective_parameters", {}))
     if effective:
-        lines.insert(2, f"    {effective}")
+        lines.append(f"    {effective}")
+    if "label_statistics" in record:
+        lines.append(
+            f"    {format_label_statistics(record['label_statistics'], locations_only=record.get('locations_only', record.get('target') == 'spots'))}"
+        )
     timings = record.get("timings", {})
     useful = [
         f"{name.removesuffix('_seconds').replace('_', '-')}={float(timings.get(name, 0.0)):.2f}s"
@@ -353,5 +359,6 @@ def workflow_report_lines(settings) -> list[str]:
             else "labels as image channels"
         ),
         f"  measurements database: {settings.measurements_database}",
+        f"  labels log info: {settings.labels_log_info}",
         "  effective model parameters are reported for each segmentation below",
     ]

@@ -75,6 +75,7 @@ class SegmentationSettings:
     write_ome_zarr_labels: bool = False
     measurements_database: str = "duckdb"
     remove_border_cells: bool = True
+    labels_log_info: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)

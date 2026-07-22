@@ -20,7 +20,9 @@ from typing import Any, Callable, Iterable
 from .settings import normalize_legacy_workflow_values
 
 
-WORKFLOW = "cisegmentation"
+WORKFLOW = "rt_cisegmentation"
+WORKFLOW_PATH = "RT_cisegmentation"
+SLURM_USER = "990:990"
 DEFAULT_BIOMERO_ROOT = Path(r"E:\NL-BIOMERO")
 DEFAULT_IMPORTER = "deployment_scenarios-biomero-importer-1"
 DEFAULT_SERVER = "deployment_scenarios-omeroserver-1"
@@ -220,7 +222,7 @@ def update_biomero_config(text: str, repo_url: str) -> tuple[str, bool]:
         )
 
     wanted = {
-        WORKFLOW: WORKFLOW,
+        WORKFLOW: WORKFLOW_PATH,
         f"{WORKFLOW}_use_gpu": "true",
         f"{WORKFLOW}_job_partition": "gpu",
         f"{WORKFLOW}_job_gpus": "1",
@@ -237,7 +239,7 @@ def update_biomero_config(text: str, repo_url: str) -> tuple[str, bool]:
             found.add(key)
     additions = [f"{key} = {value}" for key, value in wanted.items() if key not in found]
     if additions:
-        lines[end:end] = ["", "# CI Segmentation local roundtrip", *additions]
+        lines[end:end] = ["", "# Isolated CI Segmentation local roundtrip", *additions]
 
     # Recompute UI bounds because workflow insertions shift it.
     ui_start = next(i for i, line in enumerate(lines) if re.match(r"^\s*\[UI]", line, re.I))
@@ -323,6 +325,10 @@ class RoundtripRunner:
         self.emit = emit
         self.started_monotonic = time.monotonic()
         self.run_id = time.strftime("%Y%m%d_%H%M%S") + f"_{os.getpid()}"
+        self.workflow_version = (
+            (self.root / "version.txt").read_text(encoding="utf-8").strip()
+            or "0.1.0"
+        )
         self.log_dir = self.output_dir / "logs" / self.run_id
         self.summary: dict[str, Any] = {
             "roundtrip_id": self.run_id,
@@ -535,7 +541,7 @@ class RoundtripRunner:
             self.summary["docker_build_reused"] = True
             return {
                 "version": version,
-                "tag": "latest",
+                "tag": version,
                 "image_id": str(metadata.get("Id", "")),
                 "content_id": source_id,
             }
@@ -559,7 +565,7 @@ class RoundtripRunner:
         self.summary["docker_build_reused"] = False
         return {
             "version": version,
-            "tag": "latest",
+            "tag": version,
             "image_id": image_id,
             "content_id": source_id,
         }
@@ -579,11 +585,11 @@ class RoundtripRunner:
     def _regenerate_job(self) -> None:
         code = (
             "from biomero import SlurmClient\n"
-            "w='cisegmentation'\n"
+            f"w={WORKFLOW!r}\n"
             "SlurmClient.init_workflows=lambda self,force_update=False: None\n"
             "with SlurmClient.from_config(configfile='/opt/omero/server/slurm-config.ini', init_slurm=False) as c:\n"
             "  for a in ('slurm_model_repos','slurm_model_jobs','slurm_model_images'):\n"
-            "    m=getattr(c,a,None) or {}; setattr(c,a,{w:m.get(w, 'jobs/cisegmentation.sh')})\n"
+            f"    m=getattr(c,a,None) or {{}}; setattr(c,a,{{w:m.get(w, 'jobs/{WORKFLOW}.sh')}})\n"
             "  c.setup_directories(); c.update_slurm_scripts(generate_jobs=True)\n"
         )
         self.run_cmd(
@@ -593,8 +599,11 @@ class RoundtripRunner:
         )
 
     def _sync_sif(self, identity: dict[str, Any]) -> None:
-        remote_dir = "/data/my-scratch/singularity_images/workflows/cisegmentation"
-        sif = f"{remote_dir}/w_cisegmentation_latest.sif"
+        remote_dir = f"/data/my-scratch/singularity_images/workflows/{WORKFLOW_PATH}"
+        image_tag = str(identity["image_tag"])
+        if not re.fullmatch(r"[0-9A-Za-z_.-]+", image_tag):
+            raise CommandError(f"Unsafe roundtrip image tag: {image_tag!r}")
+        sif = f"{remote_dir}/w_cisegmentation_{image_tag}.sif"
         manifest_path = f"{sif}.manifest.json"
         remote_manifest: dict[str, Any] | None = None
         read = subprocess.run(
@@ -626,7 +635,7 @@ class RoundtripRunner:
             checksum = migrate.split()[-2] if len(migrate.split()) >= 2 else ""
             migrated = {**identity, "sif_sha256": checksum}
             self.run_cmd(
-                ["docker", "exec", DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(json.dumps(migrated, sort_keys=True))} > {shlex.quote(manifest_path)}"],
+                ["docker", "exec", "--user", SLURM_USER, DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(json.dumps(migrated, sort_keys=True))} > {shlex.quote(manifest_path)}"],
                 "sif_manifest.log",
             )
             self.summary["sif_reused"] = True
@@ -636,7 +645,7 @@ class RoundtripRunner:
 
         resume = self.run_cmd(
             [
-                "docker", "exec", DEFAULT_SLURM, "bash", "-lc",
+                "docker", "exec", "--user", SLURM_USER, DEFAULT_SLURM, "bash", "-lc",
                 f"tool=$(command -v apptainer || command -v singularity); candidate=$(ls -t {shlex.quote(sif)}.partial.* {shlex.quote(sif)}.partial 2>/dev/null | head -1 || true); if [ -n \"$candidate\" ] && $tool exec \"$candidate\" python /app/wrapper.py --help >/dev/null; then mv \"$candidate\" {shlex.quote(sif)}; echo RESUMED; else echo NONE; fi",
             ],
             "sif_resume.log",
@@ -650,7 +659,7 @@ class RoundtripRunner:
             ).stdout.split()[0]
             resumed_identity = {**identity, "sif_sha256": checksum}
             self.run_cmd(
-                ["docker", "exec", DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(json.dumps(resumed_identity, sort_keys=True))} > {shlex.quote(manifest_path)}"],
+                ["docker", "exec", "--user", SLURM_USER, DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(json.dumps(resumed_identity, sort_keys=True))} > {shlex.quote(manifest_path)}"],
                 "sif_manifest.log",
             )
             self.summary["sif_reused"] = False
@@ -658,10 +667,13 @@ class RoundtripRunner:
             self.summary["slurm_image"] = sif
             return
 
-        archive_name = f"w_cisegmentation_{identity['docker_image_id'].split(':')[-1][:12]}.tar"
+        archive_name = f"RT_w_cisegmentation_{identity['docker_image_id'].split(':')[-1][:12]}.tar"
         remote_archive = f"{remote_dir}/archives/{archive_name}"
         self.run_cmd(
-            ["docker", "exec", DEFAULT_SLURM, "mkdir", "-p", f"{remote_dir}/archives"],
+            [
+                "docker", "exec", DEFAULT_SLURM, "bash", "-lc",
+                f"install -d -o 990 -g 990 -m 2775 {shlex.quote(remote_dir)} {shlex.quote(remote_dir + '/archives')}",
+            ],
             "sif_prepare.log",
         )
         volume = self.run_cmd(
@@ -684,7 +696,14 @@ class RoundtripRunner:
             timeout=self.timeout,
         )
         self.run_cmd(
-            ["docker", "exec", DEFAULT_SLURM, "bash", "-lc", f"tool=$(command -v apptainer || command -v singularity) && candidate=$(ls -t {shlex.quote(sif)}.partial.* {shlex.quote(sif)}.partial 2>/dev/null | head -1 || true) && if [ -n \"$candidate\" ] && $tool exec \"$candidate\" python /app/wrapper.py --help >/dev/null; then tmp=\"$candidate\"; else tmp={shlex.quote(sif)}.partial.$$; rm -f \"$tmp\"; $tool build --force \"$tmp\" docker-archive://{shlex.quote(remote_archive)}; $tool exec \"$tmp\" python /app/wrapper.py --help >/dev/null; fi && mv \"$tmp\" {shlex.quote(sif)}"],
+            [
+                "docker", "exec", DEFAULT_SLURM, "bash", "-lc",
+                f"chown 990:990 {shlex.quote(remote_archive)} && chmod 664 {shlex.quote(remote_archive)}",
+            ],
+            "sif_archive_permissions.log",
+        )
+        self.run_cmd(
+            ["docker", "exec", "--user", SLURM_USER, DEFAULT_SLURM, "bash", "-lc", f"tool=$(command -v apptainer || command -v singularity) && candidate=$(ls -t {shlex.quote(sif)}.partial.* {shlex.quote(sif)}.partial 2>/dev/null | head -1 || true) && if [ -n \"$candidate\" ] && $tool exec \"$candidate\" python /app/wrapper.py --help >/dev/null; then tmp=\"$candidate\"; else tmp={shlex.quote(sif)}.partial.$$; rm -f \"$tmp\"; $tool build --force \"$tmp\" docker-archive://{shlex.quote(remote_archive)}; $tool exec \"$tmp\" python /app/wrapper.py --help >/dev/null; fi && mv \"$tmp\" {shlex.quote(sif)}"],
             "sif_build.log",
             timeout=self.timeout,
         )
@@ -694,7 +713,7 @@ class RoundtripRunner:
         identity = {**identity, "sif_sha256": checksum}
         manifest_json = json.dumps(identity, sort_keys=True)
         self.run_cmd(
-            ["docker", "exec", DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(manifest_json)} > {shlex.quote(manifest_path)}"],
+            ["docker", "exec", "--user", SLURM_USER, DEFAULT_SLURM, "bash", "-lc", f"printf %s {shlex.quote(manifest_json)} > {shlex.quote(manifest_path)}"],
             "sif_manifest.log",
         )
         self.summary["sif_reused"] = False
@@ -751,7 +770,7 @@ o={model}(); o.setName(rstring(os.environ['OBJECT_NAME'])); o=c.getUpdateService
             "Select how to import your results (one or more)=true",
             "Cleanup?=false",
             f"{WORKFLOW}=true",
-            f"{WORKFLOW}_Version=latest",
+            f"{WORKFLOW}_Version={self.workflow_version}",
         ]
         if target_kind == "Screen":
             args += [f"Screen_ID={target_id}", "3a) Import into NEW Screen=roundtrip-output"]
@@ -1048,7 +1067,7 @@ print('deleted' if c.getObject(k,i) is None else 'present'); c.close()
 
             self.phase("register BIOMERO workflow")
             changed = self._register(commit)
-            job_exists = subprocess.run(["docker", "exec", DEFAULT_SLURM, "test", "-s", "/data/my-scratch/slurm-scripts/jobs/cisegmentation.sh"]).returncode == 0
+            job_exists = subprocess.run(["docker", "exec", DEFAULT_SLURM, "test", "-s", f"/data/my-scratch/slurm-scripts/jobs/{WORKFLOW}.sh"]).returncode == 0
             if changed or not job_exists:
                 self._regenerate_job()
 

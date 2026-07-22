@@ -233,3 +233,89 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         SegmentationSettings(measurements_database="skip"),
     )
     assert skip_outputs == [output_dir / "sample_multistep.ome.zarr"]
+
+
+def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
+    tmp_path, monkeypatch
+):
+    store = tmp_path / "plate.ome.zarr"
+    results = [_measurement_result(tmp_path), _measurement_result(tmp_path)]
+    for index, result in enumerate(results):
+        result.source.resource.store_path = store
+        result.source.resource.image_path = f"A/1/{index}"
+        result.source.resource.plate_path = ("A", "1", str(index))
+        result.source.resource.plate_attrs = {
+            "plate": {"version": "0.4", "wells": [{"path": "A/1"}]}
+        }
+
+    monkeypatch.setattr(engine, "discover_ome_zarrs", lambda _path: [store])
+    monkeypatch.setattr(
+        engine,
+        "enumerate_resources",
+        lambda _store: [result.source.resource for result in results],
+    )
+    result_by_path = {
+        result.source.resource.image_path: result for result in results
+    }
+    events = []
+
+    def fake_read(resource):
+        return result_by_path[resource.image_path].source
+
+    def fake_segment(image, *_args, **_kwargs):
+        events.append(f"segment:{image.resource.image_path}")
+        return result_by_path[image.resource.image_path]
+
+    class FakePlateWriter:
+        def __init__(self, _resources, _output_path):
+            pass
+
+        def append(self, result):
+            events.append(f"write:{result.source.resource.image_path}")
+
+        def finalize(self):
+            events.append("finalize")
+
+        def abort(self):
+            events.append("abort")
+
+    def fake_measure(result_iterator, output_path, _format, **_kwargs):
+        for result in result_iterator:
+            events.append(f"measure:{result.source.resource.image_path}")
+        Path(output_path).touch()
+        return {
+            "images": 2,
+            "label_sets": 2,
+            "objects": 0,
+            "intensities": 0,
+            "relationships": 0,
+            "runtime_seconds": 0.0,
+        }
+
+    monkeypatch.setattr(engine, "read_image", fake_read)
+    monkeypatch.setattr(engine, "_segment_multistep_image", fake_segment)
+    monkeypatch.setattr(engine, "HCSPlateWriter", FakePlateWriter)
+    monkeypatch.setattr(
+        "cisegmentation.measurements.write_measurements_database", fake_measure
+    )
+
+    output_dir = tmp_path / "output"
+    outputs = engine.run_workflow(
+        tmp_path / "input",
+        output_dir,
+        SegmentationSettings(measurements_database="sqlite"),
+    )
+
+    assert events == [
+        "segment:A/1/0",
+        "write:A/1/0",
+        "measure:A/1/0",
+        "segment:A/1/1",
+        "write:A/1/1",
+        "measure:A/1/1",
+        "finalize",
+    ]
+    assert outputs == [
+        output_dir / "plate_multistep.ome.zarr",
+        output_dir / "plate_multistep_measurements.sqlite",
+    ]

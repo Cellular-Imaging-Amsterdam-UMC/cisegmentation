@@ -28,27 +28,43 @@ Python 3.11, PyTorch 2.11.0, torchvision 0.26.0, and CUDA 12.6 wheels. The
 script also installs the PyQt launcher dependencies and finishes with a CUDA
 smoke test.
 
+Open this repository as the VS Code workspace to select and activate the
+`cisegmentation` environment automatically. Start the supported local frontend
+with `launch.cmd`; it uses that environment explicitly and stops with an error
+if the environment has not been created. Run tests with `test.cmd`. For other
+commands outside VS Code, use `conda run -n cisegmentation` so they cannot
+accidentally run in Conda's base environment.
+
 The launcher defaults to `inputfolder` and `outputfolder` in the repository
 root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built `w_cisegmentation:latest` image; the
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.3.0`
+image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
 
 During execution, the job log reports the selected workflow and tuning values,
 input T/C/Z/Y/X dimensions, datatype, physical scales, and channel names. Every
-model call reports its resolved CPU/GPU device, dimensional mode, runtime and
-timing breakdown, model-cache status, label count, foreground fraction, and
-label-size distribution. Post-processing statistics show the final output of
-cell/nucleus matching and border removal. Structured per-step and final
-statistics are also stored in the output provenance.
+model call reports its resolved CPU/GPU device, dimensional mode, runtime,
+timing breakdown, and model-cache status. Enable **Labels Log Info** to also
+calculate label counts, foreground fractions, and size distributions for model
+and final post-processed outputs. It is disabled by default because those full
+label-array scans can be costly.
 
-For a direct local run after activating the environment:
+HCS plates are processed field by field. Each completed field is written to an
+atomic partial plate and measured immediately while its source image and labels
+are still in memory; the final plate becomes visible only after all expected
+fields have completed. This avoids retaining a full plate of images and labels
+in memory. Measurement calculation and database insertion are intentionally
+serial; multiprocessing large arrays is not enabled without workload profiling
+showing that its transfer and coordination overhead is worthwhile.
+
+For a direct local run:
 
 ```powershell
-python wrapper.py --infolder inputfolder --outfolder outputfolder `
+conda run -n cisegmentation python wrapper.py --infolder inputfolder --outfolder outputfolder `
   --cell-model cellpose3:cyto3 `
   --cell-channel 1 --cell-nuclei-channel 0 --device cuda
 ```
@@ -56,7 +72,7 @@ python wrapper.py --infolder inputfolder --outfolder outputfolder `
 Benchmark example:
 
 ```powershell
-python wrapper.py --infolder inputfolder --outfolder outputfolder `
+conda run -n cisegmentation python wrapper.py --infolder inputfolder --outfolder outputfolder `
   --cell-model skip --nucleus-model cellpose3:nuclei --nucleus-channel 1 `
   --benchmark true --device cuda
 ```
@@ -83,6 +99,7 @@ converted internally using the OME-Zarr XY scale metadata.
 | Step 3a–3d: Foci Detection (`--foci-model-1` … `--foci-model-4`) / Channel | Each beginner selector offers `Skip`, Spotiflow, `SD_Foci_*` StarDist, and Cellpose 3 `bact` models. Repeating models or channels is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
 | Include Original Data Channels (`--include-original-channels`) | Final beginner option. Prepends all source channels before the label channels. Generated label names use the collision-safe `labels_<name>` form with underscores only. The combined image remains `int32`: compatible integer intensities are preserved, while finite in-range floating-point intensities are rounded to the nearest integer. The original datatype and conversion are recorded in provenance. |
 | Write Native OME-Zarr Labels (`--write-ome-zarr-labels`) | Advanced option. Keeps the original image and datatype at the output root and writes every segmentation separately under `labels/` using the OME-Zarr 0.4 `labels` and `image-label` metadata. Duplicate output names receive a numeric suffix. This replaces the extra-label-channel layout; the Include Original Data Channels setting is therefore unnecessary in this mode. |
+| Labels Log Info (`--labels-log-info`) | Advanced option, disabled by default. Calculate and log per-step and final label counts, foreground fraction, and label size statistics. Leave disabled for faster processing of large fields. |
 | Smooth Rescaled StarDist Labels (`--smooth-stardist-labels`) | Advanced option, enabled by default. When StarDist inference downsamples a high-magnification image, its polygons are scaled and rasterized directly on the source grid for smooth boundaries. Disable it to reproduce nearest-neighbor label-map restoration. |
 
 ## Maintainer publication tools
@@ -244,6 +261,11 @@ OMERO, BIOMERO, and Slurm, then re-exports the OMERO-imported result into the
 selected output folder. `builddocker.cmd` records the source fingerprint and
 immutable image ID in a Git-ignored local state file. The roundtrip skips its
 Docker build and SIF conversion when those identities still match.
+Roundtrip registration is isolated as `rt_cisegmentation`, with Slurm images
+under `workflows/RT_cisegmentation`. It never writes into the standard
+`workflows/cisegmentation` cache. Roundtrip cache directories and artifacts are
+created for the Slurm account (`990:990`) with group-writable, setgid directory
+permissions so later BIOMERO downloads cannot be blocked by root-owned files.
 
 The progress dialog reports BIOMERO and Slurm identifiers when available and
 prints a heartbeat while analysis or result import is still running. Cancel

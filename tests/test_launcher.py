@@ -47,8 +47,9 @@ def test_local_and_docker_commands_share_workflow_parameters():
     assert local[local.index("--foci-model-1") + 1] == "stardist:SD_Foci_Finn"
     assert "docker" not in local
     assert docker[:3] == ["docker", "run", "--rm"]
-    assert "w_cisegmentation:latest" in docker
-    assert "cellularimagingcf/w_cisegmentation:latest" not in docker
+    tag = config["docker_image"]["tag"]
+    assert f"w_cisegmentation:{tag}" in docker
+    assert f"cellularimagingcf/w_cisegmentation:{tag}" not in docker
     assert docker[docker.index("--foci-model-1") + 1] == "stardist:SD_Foci_Finn"
     assert "--multi-step" not in local
 

@@ -17,6 +17,8 @@ from cisegmentation.roundtrip import (
     redact,
     roundtrip_command,
     update_biomero_config,
+    WORKFLOW,
+    WORKFLOW_PATH,
 )
 
 
@@ -47,12 +49,33 @@ def test_config_registration_is_idempotent():
     url = descriptor_url("abc123")
     updated, changed = update_biomero_config(original, url)
     assert changed
-    assert "cisegmentation_repo = " + url in updated
-    assert 'zarr_workflows = ["foo","cisegmentation"]' in updated
-    assert 'plate_workflows = ["cisegmentation"]' in updated
+    assert "rt_cisegmentation_repo = " + url in updated
+    assert "rt_cisegmentation = RT_cisegmentation" in updated
+    assert 'zarr_workflows = ["foo","rt_cisegmentation"]' in updated
+    assert 'plate_workflows = ["rt_cisegmentation"]' in updated
     again, changed_again = update_biomero_config(updated, url)
     assert not changed_again
     assert again == updated
+
+
+def test_roundtrip_registration_preserves_standard_workflow():
+    original = """[WORKFLOWS]
+cisegmentation = cisegmentation
+cisegmentation_repo = release-url
+cisegmentation_job = jobs/cisegmentation.sh
+
+[UI]
+zarr_workflows = ["cisegmentation"]
+plate_workflows = ["cisegmentation"]
+"""
+    updated, changed = update_biomero_config(original, "roundtrip-url")
+
+    assert changed
+    assert "cisegmentation_repo = release-url" in updated
+    assert "cisegmentation_job = jobs/cisegmentation.sh" in updated
+    assert "rt_cisegmentation_repo = roundtrip-url" in updated
+    assert 'zarr_workflows = ["cisegmentation","rt_cisegmentation"]' in updated
+    assert 'plate_workflows = ["cisegmentation","rt_cisegmentation"]' in updated
 
 
 def test_manifest_requires_all_identity_fields():
@@ -181,6 +204,19 @@ def test_redaction_and_roundtrip_serialization():
     assert command[-2:] == ["--gpu", "false"]
     payload = json.loads(command[command.index("--parameters-json") + 1])
     assert payload == {"model": "x", "benchmark": True}
+
+
+def test_roundtrip_uses_isolated_versioned_workflow_namespace(tmp_path):
+    (tmp_path / "version.txt").write_text("v0.3.0\n", encoding="utf-8")
+    runner = RoundtripRunner(
+        tmp_path, tmp_path, tmp_path, {}, biomero_root=tmp_path, emit=lambda _: None
+    )
+    args = runner._workflow_args("Image", 1, "Dataset", 2)
+
+    assert WORKFLOW == "rt_cisegmentation"
+    assert WORKFLOW_PATH == "RT_cisegmentation"
+    assert "rt_cisegmentation=true" in args
+    assert "rt_cisegmentation_Version=v0.3.0" in args
 
 
 def test_roundtrip_applies_black_background_glasbey_to_result_images(

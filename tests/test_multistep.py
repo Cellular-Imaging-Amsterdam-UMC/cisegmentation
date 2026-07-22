@@ -3,7 +3,7 @@ import pytest
 from types import SimpleNamespace
 
 import cisegmentation.engine as engine
-from cisegmentation.settings import SegmentationSettings
+from cisegmentation.settings import SKIP, SegmentationSettings
 
 from cisegmentation.engine import _match_cells_and_nuclei
 
@@ -85,6 +85,7 @@ def test_multistep_produces_compartment_and_independent_foci_channels(monkeypatc
             foci_channel_1=2,
             foci_model_2="spotiflow:general",
             foci_channel_2=2,
+            labels_log_info=True,
         ),
         startup_seconds=0.4,
         zarr_read_seconds=0.6,
@@ -111,8 +112,44 @@ def test_multistep_produces_compartment_and_independent_foci_channels(monkeypatc
     assert result.labels[0, 3, 0, 1, 1] != result.labels[0, 4, 0, 1, 1]
     assert any("device=CPU" in line for line in log)
     assert any("labels=" in line for line in log)
-    assert any("Post-processing" in line for line in log)
+    assert any("Labels log info" in line for line in log)
     assert any("result reused from Step 3a spots" in line for line in log)
+
+
+def test_label_log_statistics_are_skipped_by_default(monkeypatch):
+    image = SimpleNamespace(
+        data=np.zeros((1, 1, 1, 4, 4), dtype=np.uint8),
+        scales={"x": 1.0, "y": 1.0},
+    )
+
+    monkeypatch.setattr(
+        engine,
+        "segment_czyx",
+        lambda *_args, **_kwargs: (
+            np.zeros((1, 4, 4), dtype=np.uint32),
+            {"device": "cpu", "runtime_seconds": 0.0, "timings": {}},
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "label_statistics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("label statistics should be disabled")
+        ),
+    )
+    log = []
+    result = engine._segment_multistep_image(
+        image,
+        SegmentationSettings(
+            cell_model=SKIP,
+            nucleus_model="cellpose3:nuclei",
+        ),
+        log=log.append,
+    )
+
+    assert "object_count" not in result.provenance
+    assert "output_statistics" not in result.provenance
+    assert all("labels=" not in line for line in log)
 
 
 @pytest.mark.parametrize(

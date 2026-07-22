@@ -1,4 +1,7 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python.defaultInterpreterPath": "${env:LOCALAPPDATA}\\miniconda3\\envs\\cisegmentation\\python.exe",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python-envs.terminal.autoActivationType": "command",
+    "python.terminal.activateEnvironment": true,
+    "python-envs.defaultEnvManager": "ms-python.python:conda"
 }

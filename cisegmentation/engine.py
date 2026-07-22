@@ -12,11 +12,11 @@ import numpy as np
 from .adapters import segment_czyx
 from .benchmark import run_benchmark
 from .ome_zarr_io import (
+    HCSPlateWriter,
     LabelResult,
     discover_ome_zarrs,
     enumerate_resources,
     read_image,
-    write_hcs_plate,
     write_label_image,
 )
 from .registry import get_model_spec
@@ -296,6 +296,7 @@ def _run_reported_segmentation(
         labels=labels,
         info=info,
         scales=scales,
+        include_label_statistics=settings.labels_log_info,
     )
     for line in format_step_record(record):
         emit(log, line)
@@ -452,31 +453,32 @@ def _segment_multistep_image(
             time_channel_labels.append(f"labels_{spot_label}_channel_{channel}")
         if not time_channels:
             raise ValueError("Multi-step mode produced no output channels")
-        emit(log, f"  Post-processing | T{time_index + 1}")
-        for name, labels in zip(time_channel_labels, time_channels):
-            statistics = label_statistics(labels, image.scales)
-            output_statistics.append(
-                {
-                    "timepoint": time_index,
-                    "channel": name,
-                    "locations_only": bool(
-                        name.startswith("labels_spots_channel_")
-                        and not settings.spotiflow_local_refinement
+        if settings.labels_log_info:
+            emit(log, f"  Labels log info | T{time_index + 1}")
+            for name, labels in zip(time_channel_labels, time_channels):
+                statistics = label_statistics(labels, image.scales)
+                output_statistics.append(
+                    {
+                        "timepoint": time_index,
+                        "channel": name,
+                        "locations_only": bool(
+                            name.startswith("labels_spots_channel_")
+                            and not settings.spotiflow_local_refinement
+                        ),
+                        "label_statistics": statistics,
+                    }
+                )
+                emit(
+                    log,
+                    f"    {name}: "
+                    + format_label_statistics(
+                        statistics,
+                        locations_only=(
+                            name.startswith("labels_spots_channel_")
+                            and not settings.spotiflow_local_refinement
+                        ),
                     ),
-                    "label_statistics": statistics,
-                }
-            )
-            emit(
-                log,
-                f"    {name}: "
-                + format_label_statistics(
-                    statistics,
-                    locations_only=(
-                        name.startswith("labels_spots_channel_")
-                        and not settings.spotiflow_local_refinement
-                    ),
-                ),
-            )
+                )
         if not channel_labels:
             channel_labels = time_channel_labels
         per_time.append(np.stack(time_channels, axis=0))
@@ -490,7 +492,6 @@ def _segment_multistep_image(
         }
     )
     timings = _aggregate_timings(timing_records)
-    unique_ids = np.unique(tczyx)
     return LabelResult(
         tczyx,
         image,
@@ -501,7 +502,11 @@ def _segment_multistep_image(
             "runtime_seconds": sum(
                 float(info.get("runtime_seconds", 0.0)) for info in infos
             ),
-            "object_count": int(np.count_nonzero(unique_ids)),
+            **(
+                {"object_count": int(np.count_nonzero(np.unique(tczyx)))}
+                if settings.labels_log_info
+                else {}
+            ),
             "model_cache_hits": sum(
                 0
                 if bool(info.get("result_cache_hit"))
@@ -525,7 +530,11 @@ def _segment_multistep_image(
             ),
             "timings": timings,
             "step_runs": step_runs,
-            "output_statistics": output_statistics,
+            **(
+                {"output_statistics": output_statistics}
+                if settings.labels_log_info
+                else {}
+            ),
             "parameters": settings.to_dict(),
             "shared_instance_ids": ["cells", "nuclei", "cytoplasm"]
             if settings.cell_model != SKIP
@@ -647,38 +656,30 @@ def run_workflow(
     model_name = "multistep"
     for store in stores:
         resources = enumerate_resources(store)
-        results = []
-        for resource in resources:
-            read_started = time.perf_counter()
-            image = read_image(resource)
-            read_seconds = time.perf_counter() - read_started
-            for line in input_report_lines(image, read_seconds):
-                emit(log, line)
-            results.append(
-                _segment_multistep_image(
+        source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
+        output_path = output_dir / f"{source_name}_{model_name}.ome.zarr"
+
+        def segment_results():
+            nonlocal startup_remaining
+            for resource in resources:
+                read_started = time.perf_counter()
+                image = read_image(resource)
+                read_seconds = time.perf_counter() - read_started
+                for line in input_report_lines(image, read_seconds):
+                    emit(log, line)
+                result = _segment_multistep_image(
                     image,
                     settings,
                     startup_seconds=startup_remaining,
                     zarr_read_seconds=read_seconds,
                     log=log,
                 )
-            )
-            startup_remaining = 0.0
-        source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
-        output_path = (
-            output_dir
-            / (
-                f"{source_name}_{model_name}.ome.zarr"
-            )
-        )
-        if resources[0].plate_path is None:
-            emit(log, f"Writing output: {output_path}")
-            write_label_image(results[0], output_path)
-        else:
-            emit(log, f"Writing HCS output: {output_path}")
-            write_hcs_plate(results, output_path)
-        emit(log, f"Finished output: {output_path}")
-        outputs.append(output_path)
+                startup_remaining = 0.0
+                yield result
+
+        database_path = None
+        measurement_summary = None
+        write_measurements_database = None
         if settings.measurements_database != "skip":
             from .measurements import (
                 measurement_database_path,
@@ -688,18 +689,62 @@ def run_workflow(
             database_path = measurement_database_path(
                 output_dir, source_name, settings.measurements_database
             )
-            emit(
-                log,
-                f"Writing measurements database ({settings.measurements_database}): "
-                f"{database_path}",
-            )
-            measurement_summary = write_measurements_database(
-                results,
-                database_path,
-                settings.measurements_database,
-                output_ome_zarr=output_path,
-                log=log,
-            )
+
+        if resources[0].plate_path is None:
+            results = list(segment_results())
+            emit(log, f"Writing output: {output_path}")
+            write_label_image(results[0], output_path)
+            if write_measurements_database is not None and database_path is not None:
+                emit(
+                    log,
+                    f"Writing measurements database ({settings.measurements_database}): "
+                    f"{database_path}",
+                )
+                measurement_summary = write_measurements_database(
+                    results,
+                    database_path,
+                    settings.measurements_database,
+                    output_ome_zarr=output_path,
+                    log=log,
+                )
+        else:
+            emit(log, f"Streaming HCS output field by field: {output_path}")
+            plate_writer = HCSPlateWriter(resources, output_path)
+
+            def write_plate_fields():
+                for index, result in enumerate(segment_results(), start=1):
+                    field_path = "/".join(result.source.resource.plate_path or ())
+                    emit(
+                        log,
+                        f"Writing HCS field {index}/{len(resources)}: {field_path}",
+                    )
+                    plate_writer.append(result)
+                    yield result
+
+            try:
+                if write_measurements_database is not None and database_path is not None:
+                    emit(
+                        log,
+                        "Measuring each HCS field immediately after segmentation "
+                        f"({settings.measurements_database}): {database_path}",
+                    )
+                    measurement_summary = write_measurements_database(
+                        write_plate_fields(),
+                        database_path,
+                        settings.measurements_database,
+                        output_ome_zarr=output_path,
+                        log=log,
+                    )
+                else:
+                    for _result in write_plate_fields():
+                        pass
+                plate_writer.finalize()
+            except Exception:
+                plate_writer.abort()
+                raise
+        emit(log, f"Finished output: {output_path}")
+        outputs.append(output_path)
+        if measurement_summary is not None and database_path is not None:
             emit(
                 log,
                 "Finished measurements: "

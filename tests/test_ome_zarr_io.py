@@ -6,6 +6,7 @@ import pytest
 zarr = pytest.importorskip("zarr")
 
 from cisegmentation.ome_zarr_io import (  # noqa: E402
+    HCSPlateWriter,
     LabelResult,
     discover_ome_zarrs,
     enumerate_resources,
@@ -118,6 +119,44 @@ def test_hcs_root_aggregates_result_reuse_counts(inputfolder, outputfolder):
     root = zarr.open_group(str(output), mode="r")
     assert root.attrs["cisegmentation"]["result_cache_hits"] == 2
     assert root.attrs["cisegmentation"]["timings"]["local_refinement_seconds"] == 0.5
+
+
+def test_hcs_plate_writer_persists_each_field_before_finalizing(
+    inputfolder, outputfolder
+):
+    results = []
+    plate_attrs = {
+        "plate": {"version": "0.4", "wells": [{"path": "A/1"}]}
+    }
+    for field in ("0", "1"):
+        source = read_image(
+            enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0]
+        )
+        source.resource.plate_path = ("A", "1", field)
+        source.resource.plate_attrs = plate_attrs
+        labels = np.zeros(
+            (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+        )
+        results.append(LabelResult(labels, source, "multi-step", "multi-step"))
+
+    output = outputfolder / "streamed-plate.ome.zarr"
+    partial = output.with_name(output.name + ".partial")
+    writer = HCSPlateWriter(
+        [result.source.resource for result in results], output
+    )
+    writer.append(results[0])
+
+    assert (partial / "A" / "1" / "0" / "0" / ".zarray").exists()
+    assert not output.exists()
+
+    writer.append(results[1])
+    writer.finalize()
+
+    assert not partial.exists()
+    assert (output / "A" / "1" / "0" / "0" / ".zarray").exists()
+    assert (output / "A" / "1" / "1" / "0" / ".zarray").exists()
+    root = zarr.open_group(str(output), mode="r")
+    assert root.attrs["cisegmentation"]["field_count"] == 2
 
 
 def test_label_writer_rejects_ids_outside_int32_range(inputfolder, outputfolder):

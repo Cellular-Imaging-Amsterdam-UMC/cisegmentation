@@ -92,6 +92,7 @@ def test_workflow_report_lists_selected_steps_and_tuning():
     assert "output: labels as image channels" in report
     assert "effective model parameters are reported" in report
     assert "Spotiflow output: single-pixel point locations" in report
+    assert "labels log info: False" in report
 
     refined_report = "\n".join(
         workflow_report_lines(

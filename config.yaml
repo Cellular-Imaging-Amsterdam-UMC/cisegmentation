@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: latest
+  tag: v0.3.0
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -118,6 +118,7 @@ parameters:
   section_id: advanced
   mode: advanced
 - {name: write_ome_zarr_labels, type: checkbox, label: Write Native OME-Zarr Labels, description: Write the original image at the output root and each segmentation as an OME-Zarr 0.4 image-label under the labels group instead of appending label channels., default: false, cli_tag: --write-ome-zarr-labels, cli_order: 45, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: labels_log_info, type: checkbox, label: Labels Log Info, description: Calculate and log label counts, foreground fraction, and label size statistics. Disabled by default to avoid scanning large label arrays after segmentation., default: false, cli_tag: --labels-log-info, cli_order: 46, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - name: dimension_mode
   type: dropdown
   label: Dimension Mode

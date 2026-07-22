@@ -3,6 +3,10 @@
 CI Segmentation can write one measurements database for every top-level input
 OME-Zarr. A regular image produces one database containing that image. An HCS
 plate produces one database containing every well and field in the plate.
+For HCS inputs, each field is measured immediately after its segmentation is
+written, using the source image and final labels already in memory. The workflow
+does not reread the output OME-Zarr or retain all plate fields before starting
+measurements.
 
 The advanced **Create Measurements Database** selector offers:
 
