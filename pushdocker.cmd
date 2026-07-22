@@ -38,9 +38,9 @@ echo ERROR: Unknown argument: %~1
 exit /b 1
 
 :args_done
-powershell -NoProfile -Command "$v=$env:VERSION; if ($v -notmatch '\A(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?\z') { exit 1 }"
+powershell -NoProfile -Command "$v=$env:VERSION; if ($v -notmatch '\Av?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?\z') { exit 1 }"
 if errorlevel 1 (
-    echo ERROR: Version must be SemVer without build metadata, for example 1.2.3 or 1.2.3-rc.1.
+    echo ERROR: Version must be SemVer with an optional v prefix and no build metadata, for example v1.2.3 or v1.2.3-rc.1.
     exit /b 1
 )
 for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$p=Join-Path $env:REPO_ROOT 'config.yaml'; $text=Get-Content $p -Raw; $org=[regex]::Match($text,'(?ms)^docker_image:\s*.*?^\s*org:\s*([^\r\n#]+)').Groups[1].Value.Trim(); $name=[regex]::Match($text,'(?ms)^docker_image:\s*.*?^\s*name:\s*([^\r\n#]+)').Groups[1].Value.Trim(); $image=$org+'/'+$name; if ($image -ceq 'cellularimagingcf/w_cisegmentation') { $image } else { exit 1 }"`) do set "FULL_IMAGE=%%I"

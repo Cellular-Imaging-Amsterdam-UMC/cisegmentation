@@ -31,9 +31,9 @@ echo ERROR: Unknown argument: %~1
 exit /b 1
 
 :args_done
-powershell -NoProfile -Command "$v=$env:TAG; if ($v -notmatch '\A(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?\z') { exit 1 }"
+powershell -NoProfile -Command "$v=$env:TAG; if ($v -notmatch '\Av?(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?\z') { exit 1 }"
 if errorlevel 1 (
-    echo ERROR: version.txt must contain SemVer without build metadata, for example 1.2.3 or 1.2.3-rc.1.
+    echo ERROR: version.txt must contain SemVer with an optional v prefix and no build metadata, for example v1.2.3 or v1.2.3-rc.1.
     exit /b 1
 )
 if "%DRY_RUN%"=="0" if "%CONFIRMED%"=="0" (

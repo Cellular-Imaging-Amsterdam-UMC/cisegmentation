@@ -116,7 +116,8 @@ Create the release after reviewing the dry run:
 release_github.cmd --yes
 ```
 
-Publication requires a strict semantic version. Docker publishing is locked to
+Publication requires a semantic version, optionally prefixed with `v` (for
+example, `v0.3.0`). Docker publishing is locked to
 `cellularimagingcf/w_cisegmentation`; GitHub publishing is locked to the
 `Cellular-Imaging-Amsterdam-UMC/cisegmentation` origin. The GitHub release tool
 also requires a clean branch that is synchronized with its upstream.
