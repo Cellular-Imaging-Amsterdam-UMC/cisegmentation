@@ -792,16 +792,36 @@ class HCSPlateWriter:
         self.root.attrs.update(
             {key: value for key, value in source_plate.items() if key != "omero"}
         )
-        self.wells: dict[str, list[str]] = {}
+        plate_metadata = source_plate.get("plate") or {}
+        valid_acquisition_ids = {
+            acquisition["id"]
+            for acquisition in plate_metadata.get("acquisitions", [])
+            if isinstance(acquisition, dict) and "id" in acquisition
+        }
+        self.wells: dict[str, list[dict[str, Any]]] = {}
         for resource in self.resources:
             row, column, field = resource.plate_path  # type: ignore[misc]
-            self.wells.setdefault(f"{row}/{column}", []).append(field)
-        for well_path, fields in self.wells.items():
+            image_attrs: dict[str, Any] = {"path": field}
+            source_images = ((resource.well_attrs or {}).get("well") or {}).get(
+                "images", []
+            )
+            source_image = next(
+                (
+                    image
+                    for image in source_images
+                    if str(image.get("path", "")).strip("/") == field
+                ),
+                None,
+            )
+            if source_image is not None:
+                acquisition_id = source_image.get("acquisition")
+                if acquisition_id in valid_acquisition_ids:
+                    image_attrs["acquisition"] = acquisition_id
+            self.wells.setdefault(f"{row}/{column}", []).append(image_attrs)
+        for well_path, images in self.wells.items():
             well = self.root.require_group(well_path)
             well.attrs["well"] = {
-                "images": [
-                    {"path": field, "acquisition": 0} for field in sorted(fields)
-                ],
+                "images": sorted(images, key=lambda image: image["path"]),
                 "version": "0.4",
             }
         if "plate" not in self.root.attrs:

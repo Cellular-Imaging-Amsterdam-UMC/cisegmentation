@@ -134,6 +134,12 @@ def test_hcs_plate_writer_persists_each_field_before_finalizing(
         )
         source.resource.plate_path = ("A", "1", field)
         source.resource.plate_attrs = plate_attrs
+        source.resource.well_attrs = {
+            "well": {
+                "images": [{"path": field, "acquisition": 0}],
+                "version": "0.4",
+            }
+        }
         labels = np.zeros(
             (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
         )
@@ -157,6 +163,37 @@ def test_hcs_plate_writer_persists_each_field_before_finalizing(
     assert (output / "A" / "1" / "1" / "0" / ".zarray").exists()
     root = zarr.open_group(str(output), mode="r")
     assert root.attrs["cisegmentation"]["field_count"] == 2
+    assert root["A/1"].attrs["well"]["images"] == [
+        {"path": "0"},
+        {"path": "1"},
+    ]
+
+
+def test_hcs_plate_writer_preserves_declared_acquisition(inputfolder, outputfolder):
+    source = read_image(enumerate_resources(inputfolder / "nuclei-small.ome.zarr")[0])
+    source.resource.plate_path = ("A", "1", "0")
+    source.resource.plate_attrs = {
+        "plate": {
+            "version": "0.4",
+            "wells": [{"path": "A/1"}],
+            "acquisitions": [{"id": 7, "name": "round-1"}],
+        }
+    }
+    source.resource.well_attrs = {
+        "well": {
+            "images": [{"path": "0", "acquisition": 7}],
+            "version": "0.4",
+        }
+    }
+    labels = np.zeros(
+        (source.data.shape[0], 1, *source.data.shape[2:]), dtype=np.uint32
+    )
+    result = LabelResult(labels, source, "multi-step", "multi-step")
+
+    output = write_hcs_plate([result], outputfolder / "acquisition-plate.ome.zarr")
+    root = zarr.open_group(str(output), mode="r")
+
+    assert root["A/1"].attrs["well"]["images"] == [{"path": "0", "acquisition": 7}]
 
 
 def test_label_writer_rejects_ids_outside_int32_range(inputfolder, outputfolder):
