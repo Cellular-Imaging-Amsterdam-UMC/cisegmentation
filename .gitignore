@@ -6,6 +6,7 @@ __pycache__/
 .last_launcher_settings.json
 .docker-build-state.json
 outputs/
+localdata/
 inputfolder/*
 !inputfolder/.gitkeep
 outputfolder/*
