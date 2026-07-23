@@ -89,7 +89,7 @@ def test_workflow_report_lists_selected_steps_and_tuning():
     assert "Step 2: stardist:SD_Nuclei_Versatile" in report
     assert "Step 3a: spotiflow:general" in report
     assert "requested device=auto" in report
-    assert "output: labels as image channels" in report
+    assert "output: native OME-Zarr 0.4 labels" in report
     assert "effective model parameters are reported" in report
     assert "Spotiflow output: single-pixel point locations" in report
     assert "labels log info: False" in report
@@ -105,6 +105,11 @@ def test_workflow_report_lists_selected_steps_and_tuning():
         workflow_report_lines(SegmentationSettings(write_ome_zarr_labels=True))
     )
     assert "native OME-Zarr 0.4 labels" in native_report
+
+    channel_report = "\n".join(
+        workflow_report_lines(SegmentationSettings(write_ome_zarr_labels=False))
+    )
+    assert "output: labels as image channels" in channel_report
 
 
 def test_effective_parameters_report_model_defaults_and_stardist_rescaling():

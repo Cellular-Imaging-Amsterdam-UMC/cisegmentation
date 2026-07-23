@@ -23,8 +23,8 @@ def test_nuclei_spots_cytoplasm_expansion_matches_direct_cell_result_structure()
     )
     expansion_settings = SegmentationSettings(
         cell_model="expand:cellpose3:nuclei",
-        cell_channel=3,
-        cell_nuclei_channel=1,
+        cell_channel=1,
+        cell_nuclei_channel=0,
         cell_expansion_distance=5.0,
         nucleus_model="cellpose3:nuclei",
         nucleus_channel=1,

@@ -72,7 +72,7 @@ class SegmentationSettings:
     foci_model_4: str = SKIP
     foci_channel_4: int = 1
     include_original_channels: bool = False
-    write_ome_zarr_labels: bool = False
+    write_ome_zarr_labels: bool = True
     measurements_database: str = "duckdb"
     remove_border_cells: bool = True
     labels_log_info: bool = False
@@ -106,8 +106,10 @@ class SegmentationSettings:
         return self.cell_model.removeprefix(EXPANSION_PREFIX)
 
     def cell_expansion_channel(self) -> int:
-        """Use the explicit nucleus input for expansion, falling back to primary."""
-        return self.cell_nuclei_channel or self.cell_channel
+        """Accept the expansion seed channel in either Step 1 channel field."""
+        if self.cell_nuclei_channel > 1:
+            return self.cell_nuclei_channel
+        return self.cell_channel
 
     def validate_steps(self) -> None:
         if not (

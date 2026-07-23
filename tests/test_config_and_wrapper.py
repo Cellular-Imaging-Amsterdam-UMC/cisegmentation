@@ -60,9 +60,9 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["nucleus_channel"]["default"] == 1
     assert all(parameters[f"foci_channel_{slot}"]["default"] == 1 for slot in range(1, 5))
     assert parameters["include_original_channels"]["default"] is False
-    assert parameters["write_ome_zarr_labels"]["default"] is False
-    assert parameters["write_ome_zarr_labels"]["mode"] == "advanced"
-    assert parameters["write_ome_zarr_labels"]["section_id"] == "advanced"
+    assert parameters["write_ome_zarr_labels"]["default"] is True
+    assert parameters["write_ome_zarr_labels"]["mode"] == "beginner"
+    assert parameters["write_ome_zarr_labels"]["section_id"] == "essential"
     assert parameters["labels_log_info"]["default"] is False
     assert parameters["labels_log_info"]["mode"] == "advanced"
     assert parameters["labels_log_info"]["section_id"] == "advanced"
@@ -82,11 +82,18 @@ def test_bilayers_config_is_structurally_valid():
     assert beginner_names.index("cell_nuclei_channel") + 1 == beginner_names.index(
         "cell_expansion_distance"
     )
-    assert beginner_names[-2:] == ["remove_border_cells", "include_original_channels"]
+    assert beginner_names[-4:] == [
+        "remove_border_cells",
+        "include_original_channels",
+        "measurements_database",
+        "write_ome_zarr_labels",
+    ]
     assert parameters["include_original_channels"]["mode"] == "beginner"
     assert parameters["include_original_channels"]["section_id"] == "essential"
     assert parameters["benchmark"]["mode"] == "advanced"
     assert parameters["measurements_database"]["default"] == "duckdb"
+    assert parameters["measurements_database"]["mode"] == "beginner"
+    assert parameters["measurements_database"]["section_id"] == "essential"
     assert [
         option["value"] for option in parameters["measurements_database"]["options"]
     ] == ["duckdb", "sqlite", "skip"]
@@ -95,10 +102,22 @@ def test_bilayers_config_is_structurally_valid():
         for item in config["parameters"]
         if item.get("mode") == "advanced"
     ]
+    assert parameters["foci_model_1"]["section_id"] == "essential"
+    assert parameters["foci_model_1"]["mode"] == "beginner"
+    assert advanced_names[:6] == [
+        "foci_model_2",
+        "foci_channel_2",
+        "foci_model_3",
+        "foci_channel_3",
+        "foci_model_4",
+        "foci_channel_4",
+    ]
     assert all(
-        parameters[f"foci_model_{slot}"]["section_id"] == "essential"
-        and parameters[f"foci_model_{slot}"]["mode"] == "beginner"
-        for slot in range(1, 5)
+        parameters[f"foci_model_{slot}"]["section_id"] == "advanced"
+        and parameters[f"foci_model_{slot}"]["mode"] == "advanced"
+        and parameters[f"foci_channel_{slot}"]["section_id"] == "advanced"
+        and parameters[f"foci_channel_{slot}"]["mode"] == "advanced"
+        for slot in range(2, 5)
     )
     spot_models = {option["value"] for option in parameters["foci_model_1"]["options"]}
     assert {

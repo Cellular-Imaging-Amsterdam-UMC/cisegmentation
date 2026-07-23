@@ -36,6 +36,15 @@ if errorlevel 1 (
     echo ERROR: version.txt must contain SemVer with an optional v prefix and no build metadata, for example v1.2.3 or v1.2.3-rc.1.
     exit /b 1
 )
+set "CONFIG_SYNC_NEEDED=0"
+python "%REPO_ROOT%\tools\sync_config_version.py" "%REPO_ROOT%\config.yaml" "%TAG%" --check >nul
+set "CONFIG_SYNC_EXIT=!ERRORLEVEL!"
+if "!CONFIG_SYNC_EXIT!"=="2" (
+    set "CONFIG_SYNC_NEEDED=1"
+) else if not "!CONFIG_SYNC_EXIT!"=="0" (
+    echo ERROR: Could not validate the Docker tag in config.yaml.
+    exit /b 1
+)
 if "%DRY_RUN%"=="0" if "%CONFIRMED%"=="0" (
     echo ERROR: Creating and publishing a GitHub release requires explicit confirmation.
     echo Re-run with --yes, or use --dry-run to validate without changing GitHub.
@@ -114,6 +123,18 @@ gh release view "%TAG%" >nul 2>nul
 if not errorlevel 1 (
     echo ERROR: GitHub release %TAG% already exists.
     goto :fail
+)
+
+if "%CONFIG_SYNC_NEEDED%"=="1" (
+    echo Synchronizing config.yaml Docker tag with %TAG%...
+    call :run_or_echo python "%REPO_ROOT%\tools\sync_config_version.py" "%REPO_ROOT%\config.yaml" "%TAG%"
+    if errorlevel 1 goto :fail
+    call :run_or_echo git add -- config.yaml
+    if errorlevel 1 goto :fail
+    call :run_or_echo git commit -m "Set config Docker tag to %TAG%"
+    if errorlevel 1 goto :fail
+    call :run_or_echo git push origin HEAD
+    if errorlevel 1 goto :fail
 )
 
 echo Creating annotated tag %TAG%...

@@ -312,8 +312,8 @@ def workflow_report_lines(settings) -> list[str]:
         expansion_channel = settings.cell_expansion_channel()
         channel_source = (
             "Step 1 nucleus channel"
-            if settings.cell_nuclei_channel > 0
-            else "Step 1 Cyto Channel fallback"
+            if settings.cell_nuclei_channel > 1
+            else "Step 1 Cyto Channel"
         )
         step1 = (
             f"Step 1: expand nuclei with {expansion} on C{expansion_channel} "

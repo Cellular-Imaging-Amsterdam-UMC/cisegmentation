@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.3.0
+  tag: v0.3.2
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -70,8 +70,8 @@ parameters:
   optional: true
   section_id: essential
   mode: beginner
-- {name: cell_channel, type: integer, label: Step 1 Cyto Channel, description: One-based cell/cytoplasm channel for direct segmentation. Cell expansion uses this only when Step 1 Nucleus Channel is 0., default: 1, minimum: 1, cli_tag: --cell-channel, cli_order: 11, optional: true, section_id: essential, mode: beginner}
-- {name: cell_nuclei_channel, type: integer, label: Step 1 Nucleus Channel, description: One-based nucleus input supplied as the second channel to direct cell models and used as the nucleus seed channel for cell expansion. Use 0 to omit the second direct-model input or make expansion fall back to the Cyto Channel., default: 0, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
+- {name: cell_channel, type: integer, label: Step 1 Cyto Channel, description: One-based cell/cytoplasm channel for direct segmentation. For cell expansion this field may also supply the nucleus seed channel; if both Step 1 channel fields are above 1 the Nucleus Channel wins., default: 1, minimum: 1, cli_tag: --cell-channel, cli_order: 11, optional: true, section_id: essential, mode: beginner}
+- {name: cell_nuclei_channel, type: integer, label: Step 1 Nucleus Channel, description: One-based nucleus input supplied as the second channel to direct cell models. For cell expansion either Step 1 channel field may supply the nucleus seed; this field wins when both are above 1. Use 0 to omit it., default: 0, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
 - {name: cell_expansion_distance, type: float, label: Step 1 Expansion Distance (µm), description: Maximum XY distance in µm to expand each nucleus into a cell using a fast Euclidean nearest-label transform., default: 10.0, minimum: 0.0, cli_tag: --cell-expansion-distance, cli_order: 17, optional: true, section_id: essential, mode: beginner}
 - name: nucleus_model
   type: dropdown
@@ -97,14 +97,30 @@ parameters:
   section_id: essential
   mode: beginner
 - {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
-- {name: foci_model_2, type: dropdown, label: "Step 3b: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: essential, mode: beginner}
-- {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: essential, mode: beginner}
-- {name: foci_model_3, type: dropdown, label: "Step 3c: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: essential, mode: beginner}
-- {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 1, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: essential, mode: beginner}
-- {name: foci_model_4, type: dropdown, label: "Step 3d: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: essential, mode: beginner}
-- {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 1, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: essential, mode: beginner}
 - {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
 - {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: false, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
+- name: measurements_database
+  type: string
+  label: Create Measurements Database
+  description: Write object shape, location, per-channel intensity, and overlap relationships to one database per input image or HCS screen.
+  default: duckdb
+  options:
+  - {label: DuckDB, value: duckdb}
+  - {label: SQLite, value: sqlite}
+  - {label: Skip, value: skip}
+  multiselect: false
+  cli_tag: --measurements-database
+  cli_order: 29
+  optional: true
+  section_id: essential
+  mode: beginner
+- {name: write_ome_zarr_labels, type: checkbox, label: Write Native OME-Zarr Labels, description: Write the original image at the output root and each segmentation as an OME-Zarr 0.4 image-label under the labels group instead of appending label channels., default: true, cli_tag: --write-ome-zarr-labels, cli_order: 45, optional: true, append_value: true, section_id: essential, mode: beginner}
+- {name: foci_model_2, type: dropdown, label: "Step 3b: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_model_3, type: dropdown, label: "Step 3c: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 1, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_model_4, type: dropdown, label: "Step 3d: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 1, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: advanced, mode: advanced}
 - name: device
   type: dropdown
   label: Compute Device
@@ -117,7 +133,6 @@ parameters:
   optional: true
   section_id: advanced
   mode: advanced
-- {name: write_ome_zarr_labels, type: checkbox, label: Write Native OME-Zarr Labels, description: Write the original image at the output root and each segmentation as an OME-Zarr 0.4 image-label under the labels group instead of appending label channels., default: false, cli_tag: --write-ome-zarr-labels, cli_order: 45, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - {name: labels_log_info, type: checkbox, label: Labels Log Info, description: Calculate and log label counts, foreground fraction, and label size statistics. Disabled by default to avoid scanning large label arrays after segmentation., default: false, cli_tag: --labels-log-info, cli_order: 46, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - name: dimension_mode
   type: dropdown
@@ -140,19 +155,4 @@ parameters:
 - {name: spotiflow_prob_threshold, type: float, label: Spotiflow Probability Threshold, description: Use -1 for checkpoint default., default: -1.0, cli_tag: --spotiflow-prob-threshold, cli_order: 26, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_min_distance, type: float, label: Spotiflow Minimum Distance (µm), description: Minimum detected-point separation in µm, converted using OME-Zarr XY pixel size., default: 1.0, minimum: 0.0, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_local_refinement, type: checkbox, label: Spotiflow Local Mask Refinement, description: Grow each Spotiflow point into a bounded mask using local signal and background. Supports 2D and forced slice-wise 2D., default: false, cli_tag: --spotiflow-local-refinement, cli_order: 28, optional: true, append_value: true, section_id: advanced, mode: advanced}
-- name: measurements_database
-  type: string
-  label: Create Measurements Database
-  description: Write object shape, location, per-channel intensity, and overlap relationships to one database per input image or HCS screen.
-  default: duckdb
-  options:
-  - {label: DuckDB, value: duckdb}
-  - {label: SQLite, value: sqlite}
-  - {label: Skip, value: skip}
-  multiselect: false
-  cli_tag: --measurements-database
-  cli_order: 29
-  optional: true
-  section_id: advanced
-  mode: advanced
 - {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Benchmark every model offered for each enabled segmentation step on first T and a centered maximum 1024x1024 ROI; write one rendered 2D XY RGB OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 44, optional: true, append_value: true, section_id: advanced, mode: advanced}

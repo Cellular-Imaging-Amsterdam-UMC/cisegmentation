@@ -355,7 +355,7 @@ def test_expansion_benchmark_uses_all_selectable_seed_models():
     assert len(cases) == 5
     assert {case.step for case in cases} == {"Step 1 expansion nuclei"}
     assert {case.target for case in cases} == {"nuclei"}
-    assert {case.primary_channel for case in cases} == {1}
+    assert {case.primary_channel for case in cases} == {3}
     assert {"cellpose-sam:cpsam_v2", "cellpose-sam:cpsam"} <= {
         case.spec.id for case in cases
     }

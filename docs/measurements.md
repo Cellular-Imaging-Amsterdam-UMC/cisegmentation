@@ -8,7 +8,7 @@ written, using the source image and final labels already in memory. The workflow
 does not reread the output OME-Zarr or retain all plate fields before starting
 measurements.
 
-The advanced **Create Measurements Database** selector offers:
+The beginner **Create Measurements Database** selector offers:
 
 - `DuckDB` (default): best for large analytical queries and JupyterLite.
 - `SQLite`: maximum compatibility with Python's standard library and database tools.

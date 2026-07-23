@@ -36,6 +36,31 @@ def test_channel_selection_is_one_based_and_validated():
         SegmentationSettings(primary_channel=4).selected_channels(3)
 
 
+@pytest.mark.parametrize(
+    ("cyto_channel", "nucleus_channel", "expected"),
+    [
+        (1, 0, 1),
+        (3, 0, 3),
+        (1, 3, 3),
+        (3, 1, 3),
+        (2, 3, 3),
+    ],
+)
+def test_cell_expansion_channel_accepts_either_step1_field(
+    cyto_channel, nucleus_channel, expected
+):
+    settings = SegmentationSettings(
+        cell_model="expand:cellpose3:nuclei",
+        cell_channel=cyto_channel,
+        cell_nuclei_channel=nucleus_channel,
+    )
+    assert settings.cell_expansion_channel() == expected
+
+
+def test_native_ome_zarr_labels_are_enabled_by_default():
+    assert SegmentationSettings().write_ome_zarr_labels is True
+
+
 def test_four_independent_foci_slots_retain_duplicate_channels():
     settings = SegmentationSettings(
         foci_model_1="spotiflow:general",
