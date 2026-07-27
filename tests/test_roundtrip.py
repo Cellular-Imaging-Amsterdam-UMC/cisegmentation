@@ -51,6 +51,9 @@ def test_config_registration_is_idempotent():
     assert changed
     assert "rt_cisegmentation_repo = " + url in updated
     assert "rt_cisegmentation = RT_cisegmentation" in updated
+    assert updated.index("rt_cisegmentation_job = ") < updated.index(
+        "rt_cisegmentation_job_partition = "
+    )
     assert 'zarr_workflows = ["foo","rt_cisegmentation"]' in updated
     assert 'plate_workflows = ["rt_cisegmentation"]' in updated
     again, changed_again = update_biomero_config(updated, url)

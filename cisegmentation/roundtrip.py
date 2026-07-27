@@ -224,10 +224,12 @@ def update_biomero_config(text: str, repo_url: str) -> tuple[str, bool]:
     wanted = {
         WORKFLOW: WORKFLOW_PATH,
         f"{WORKFLOW}_use_gpu": "true",
-        f"{WORKFLOW}_job_partition": "gpu",
-        f"{WORKFLOW}_job_gpus": "1",
         f"{WORKFLOW}_repo": repo_url,
         f"{WORKFLOW}_job": f"jobs/{WORKFLOW}.sh",
+        # BIOMERO initializes the per-job parameter collection when it reads
+        # the *_job key, so job parameters must follow it in the INI file.
+        f"{WORKFLOW}_job_partition": "gpu",
+        f"{WORKFLOW}_job_gpus": "1",
     }
     start, end = section_starts[workflow_section], section_end(workflow_section)
     found: set[str] = set()
