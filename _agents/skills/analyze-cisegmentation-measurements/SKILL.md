@@ -2,13 +2,15 @@
 name: analyze-cisegmentation-measurements
 description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite. Use in JupyterLite AI for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
 metadata:
-  version: "2"
+  version: "3"
   biomero-purpose: "attachment-analysis"
   biomero-consumers: "omero-analysis-chat,omero-jupyterlite"
   biomero-auto-activate: "true"
   biomero-file-extensions: ".duckdb,.sqlite"
   biomero-filename-globs: "*__cisegmentation_measurements.duckdb,*__cisegmentation_measurements.sqlite"
   biomero-required-tables: "schema_info,measurement_runs"
+  biomero-required-resources: "references/REFERENCE.md"
+  biomero-required-capabilities: "sql-readonly,zarr-render-v2,zarr-gallery-v1"
 ---
 
 # Instructions
@@ -16,21 +18,12 @@ metadata:
 Help the user inspect and analyze an attached CI Segmentation measurements
 database in OMERO Analysis Chat or JupyterLite.
 
-## Load the reference
+## Required reference
 
-Before writing a nontrivial query or interpreting measurement fields, load:
+The consumer must load this reference automatically when the skill activates:
 
 ```text
 references/REFERENCE.md
-```
-
-Call `load_skill` with:
-
-```json
-{
-  "name": "analyze-cisegmentation-measurements",
-  "resource": "references/REFERENCE.md"
-}
 ```
 
 Use that resource as the authoritative reference for the database schema,
@@ -40,8 +33,9 @@ measurement semantics, convenience views, and query examples.
 
 1. Identify the attached or uploaded `.duckdb` or `.sqlite` file.
 2. Open the database read-only.
-3. Inspect its actual tables, views, and columns before drafting a substantive
-   query. Do not assume every database uses the latest schema.
+3. Read `schema_info` once. Inspect tables or columns only when the schema
+   version is unknown or the documented query fails. Reuse verified schema
+   facts for every follow-up while the file hash is unchanged.
 4. Read `schema_info` and `measurement_runs` when schema version, provenance,
    workflow settings, output store identity, or source and output paths matter.
 5. Prefer the documented convenience views when they contain the needed
@@ -50,6 +44,16 @@ measurement semantics, convenience views, and query examples.
 7. Explain the queried columns, filters, grouping, units, relationship
    direction, and relevant calibration or missing-value caveats.
 8. Close the database connection.
+
+For object-to-render requests, use the canonical combined query in the
+reference so the object, its related objects, navigation rows, and render
+coordinates are resolved in one execution. Reuse that successful result for
+rendering; do not rediscover files or schema. Treat image-QC findings as
+**review candidates**, never definitive bad images.
+
+For questions whose answer should be a PNG, load
+`references/PNG_QUESTIONS.md` only when needed. Prefer a single bounded gallery
+request over one render request per object.
 
 ## JupyterLite constraints
 

@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.3.3
+  tag: v0.4.0
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:

@@ -8,6 +8,7 @@ import pytest
 
 import cisegmentation.engine as engine
 from cisegmentation.measurements import (
+    _image_quality_values,
     measurement_database_path,
     write_measurements_database,
 )
@@ -129,7 +130,30 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
         output,
         database_format,
         "SELECT value FROM schema_info WHERE key='schema_version'",
-    ) == [("3",)]
+    ) == [("4",)]
+    assert summary["image_quality"] == 2
+    assert summary["field_quality"] == 1
+    assert _query(
+        output,
+        database_format,
+        """
+        SELECT channel_index, sample_count, focus_score, intensity_p01,
+               intensity_p99
+        FROM image_quality_features
+        ORDER BY channel_index
+        """,
+    )[0][:2] == (1, 36)
+    field_quality = _query(
+        output,
+        database_format,
+        """
+        SELECT cell_count, nucleus_count, foci_count, total_label_count,
+               zero_cell_count
+        FROM field_quality_summary
+        """,
+    )[0]
+    assert field_quality[:4] == (1, 1, 2, 5)
+    assert bool(field_quality[4]) is False
     assert _query(
         output,
         database_format,
@@ -226,6 +250,33 @@ def test_measurement_database_path_is_one_file_per_input_store(tmp_path):
     assert measurement_database_path(tmp_path, "plate", "sqlite") == (
         tmp_path / "plate__cisegmentation_measurements.sqlite"
     )
+
+
+def test_synthetic_image_quality_metrics_rank_expected_artifacts():
+    yy, xx = np.indices((128, 128))
+    sharp = ((xx + yy) % 2).astype(np.float64)
+    blurred = np.full((128, 128), 0.5, dtype=np.float64)
+    saturated = np.zeros((128, 128), dtype=np.uint16)
+    saturated[:, :120] = np.iinfo(np.uint16).max
+    gradient = np.tile(np.linspace(1, 100, 128), (128, 1))
+    flat = np.full((128, 128), 50.0)
+    debris = np.zeros((128, 128), dtype=np.float64)
+    debris[40:72, 40:72] = 1000
+
+    sharp_qc = _image_quality_values(sharp)
+    blurred_qc = _image_quality_values(blurred)
+    saturated_qc = _image_quality_values(saturated)
+    gradient_qc = _image_quality_values(gradient)
+    flat_qc = _image_quality_values(flat)
+    debris_qc = _image_quality_values(debris)
+
+    assert sharp_qc["focus_score"] > blurred_qc["focus_score"]
+    assert sharp_qc["gradient_energy"] > blurred_qc["gradient_energy"]
+    assert saturated_qc["maximal_pixel_fraction"] > 0.9
+    assert gradient_qc["illumination_block_cv"] > flat_qc["illumination_block_cv"]
+    assert gradient_qc["illumination_fitted_gradient"] > 0.5
+    assert debris_qc["bright_area_fraction"] > 0.05
+    assert debris_qc["largest_bright_component_fraction"] > 0.05
 
 
 def test_output_label_paths_match_native_groups_and_appended_channels(tmp_path):

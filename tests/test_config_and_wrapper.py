@@ -59,7 +59,7 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["cell_nuclei_channel"]["default"] == 0
     assert parameters["nucleus_channel"]["default"] == 1
     assert all(parameters[f"foci_channel_{slot}"]["default"] == 1 for slot in range(1, 5))
-    assert parameters["include_original_channels"]["default"] is False
+    assert parameters["include_original_channels"]["default"] is True
     assert parameters["write_ome_zarr_labels"]["default"] is True
     assert parameters["write_ome_zarr_labels"]["mode"] == "beginner"
     assert parameters["write_ome_zarr_labels"]["section_id"] == "essential"

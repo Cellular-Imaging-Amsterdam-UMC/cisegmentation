@@ -17,8 +17,9 @@ from .ome_zarr_io import LabelResult, _label_group_names, new_output_store_uuid
 from .settings import OUTPUT_NAME_POSTFIX
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DATABASE_FORMATS = {"duckdb": ".duckdb", "sqlite": ".sqlite"}
+QUALITY_SAMPLE_PIXELS = 1_048_576
 
 
 OBJECT_COLUMNS = (
@@ -55,6 +56,27 @@ RELATIONSHIP_COLUMNS = (
     "overlap_voxels", "overlap_um2", "overlap_um3", "source_overlap_fraction",
     "target_overlap_fraction", "source_centroid_in_target",
     "centroid_distance_um", "is_primary_for_source",
+)
+
+IMAGE_QUALITY_COLUMNS = (
+    "image_quality_id", "image_id", "channel_id", "timepoint", "z_index",
+    "sample_count", "finite_fraction", "focus_score", "gradient_energy",
+    "intensity_mean", "intensity_median", "intensity_stddev", "intensity_mad",
+    "intensity_p01", "intensity_p99", "minimal_pixel_fraction",
+    "maximal_pixel_fraction", "illumination_block_cv", "edge_center_ratio",
+    "illumination_fitted_gradient", "bright_area_fraction",
+    "largest_bright_component_fraction", "focus_anomaly_score",
+    "intensity_anomaly_score", "saturation_anomaly_score",
+    "illumination_anomaly_score", "artifact_anomaly_score", "anomaly_score",
+    "review_candidate", "review_reasons",
+)
+
+FIELD_QUALITY_COLUMNS = (
+    "field_quality_id", "image_id", "timepoint", "cell_count",
+    "nucleus_count", "foci_count", "total_label_count",
+    "cell_count_robust_z", "zero_cell_count", "unusually_low_cell_count",
+    "unusually_high_cell_count", "image_anomaly_score", "anomaly_score",
+    "review_candidate", "review_reasons",
 )
 
 
@@ -202,6 +224,57 @@ CREATE TABLE intensity_measurements (
     coefficient_of_variation DOUBLE,
     PRIMARY KEY (object_id, channel_id)
 );
+CREATE TABLE image_quality_measurements (
+    image_quality_id BIGINT PRIMARY KEY,
+    image_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    timepoint INTEGER NOT NULL,
+    z_index INTEGER NOT NULL,
+    sample_count BIGINT NOT NULL,
+    finite_fraction DOUBLE NOT NULL,
+    focus_score DOUBLE,
+    gradient_energy DOUBLE,
+    intensity_mean DOUBLE,
+    intensity_median DOUBLE,
+    intensity_stddev DOUBLE,
+    intensity_mad DOUBLE,
+    intensity_p01 DOUBLE,
+    intensity_p99 DOUBLE,
+    minimal_pixel_fraction DOUBLE,
+    maximal_pixel_fraction DOUBLE,
+    illumination_block_cv DOUBLE,
+    edge_center_ratio DOUBLE,
+    illumination_fitted_gradient DOUBLE,
+    bright_area_fraction DOUBLE,
+    largest_bright_component_fraction DOUBLE,
+    focus_anomaly_score DOUBLE,
+    intensity_anomaly_score DOUBLE,
+    saturation_anomaly_score DOUBLE,
+    illumination_anomaly_score DOUBLE,
+    artifact_anomaly_score DOUBLE,
+    anomaly_score DOUBLE,
+    review_candidate BOOLEAN NOT NULL,
+    review_reasons TEXT NOT NULL,
+    UNIQUE (image_id, channel_id, timepoint, z_index)
+);
+CREATE TABLE field_quality_measurements (
+    field_quality_id BIGINT PRIMARY KEY,
+    image_id BIGINT NOT NULL,
+    timepoint INTEGER NOT NULL,
+    cell_count BIGINT NOT NULL,
+    nucleus_count BIGINT NOT NULL,
+    foci_count BIGINT NOT NULL,
+    total_label_count BIGINT NOT NULL,
+    cell_count_robust_z DOUBLE,
+    zero_cell_count BOOLEAN NOT NULL,
+    unusually_low_cell_count BOOLEAN NOT NULL,
+    unusually_high_cell_count BOOLEAN NOT NULL,
+    image_anomaly_score DOUBLE,
+    anomaly_score DOUBLE,
+    review_candidate BOOLEAN NOT NULL,
+    review_reasons TEXT NOT NULL,
+    UNIQUE (image_id, timepoint)
+);
 CREATE TABLE relationships (
     relationship_id BIGINT PRIMARY KEY,
     image_id BIGINT NOT NULL,
@@ -237,6 +310,21 @@ SELECT m.*, o.image_id, o.label_set_id, o.timepoint, o.label_value, o.object_typ
 FROM intensity_measurements m
 JOIN objects o ON o.object_id = m.object_id
 JOIN channels c ON c.channel_id = m.channel_id;
+
+CREATE VIEW image_quality_features AS
+SELECT q.*, i.image_name, i.plate_row, i.plate_column, i.field_index,
+       c.channel_index, c.channel_name
+FROM image_quality_measurements q
+JOIN images i ON i.image_id = q.image_id
+JOIN channels c ON c.channel_id = q.channel_id;
+
+CREATE VIEW field_quality_summary AS
+SELECT f.*, i.image_name, i.plate_row, i.plate_column, i.field_index,
+       i.source_resource_path, i.output_resource_path,
+       CASE WHEN f.review_candidate THEN 'review candidate' ELSE 'within peer range' END
+           AS review_status
+FROM field_quality_measurements f
+JOIN images i ON i.image_id = f.image_id;
 
 CREATE VIEW label_sources AS
 SELECT s.label_set_id, ls.image_id, ls.label_set_index, ls.label_name,
@@ -332,6 +420,9 @@ class _DatabaseWriter:
             "CREATE UNIQUE INDEX idx_objects_label ON objects(label_set_id, timepoint, label_value)",
             "CREATE INDEX idx_objects_image_type ON objects(image_id, object_type)",
             "CREATE INDEX idx_intensity_channel ON intensity_measurements(channel_id, object_id)",
+            "CREATE INDEX idx_image_quality_peer ON image_quality_measurements(channel_id, timepoint, z_index)",
+            "CREATE INDEX idx_image_quality_review ON image_quality_measurements(review_candidate, anomaly_score)",
+            "CREATE INDEX idx_field_quality_review ON field_quality_measurements(review_candidate, anomaly_score)",
             "CREATE INDEX idx_relationship_source ON relationships(source_object_id, target_label_set_id)",
             "CREATE INDEX idx_relationship_target ON relationships(target_object_id, source_label_set_id)",
         ):
@@ -678,6 +769,296 @@ def _intensity_row(object_id: int, channel_id: int, values: np.ndarray) -> tuple
     )
 
 
+def _bounded_plane_sample(
+    plane: np.ndarray, maximum_pixels: int = QUALITY_SAMPLE_PIXELS
+) -> np.ndarray:
+    """Return a deterministic grid sample without copying the level-0 plane."""
+    array = np.asarray(plane)
+    if array.ndim != 2:
+        raise ValueError(f"Image-QC planes must be 2D, got shape {array.shape}")
+    stride = max(1, int(math.ceil(math.sqrt(array.size / maximum_pixels))))
+    return array[::stride, ::stride]
+
+
+def _block_means(array: np.ndarray, blocks: int = 4) -> np.ndarray:
+    means = []
+    for y_part in np.array_split(array, min(blocks, array.shape[0]), axis=0):
+        for block in np.array_split(y_part, min(blocks, array.shape[1]), axis=1):
+            finite = block[np.isfinite(block)]
+            if finite.size:
+                means.append(float(np.mean(finite)))
+    return np.asarray(means, dtype=np.float64)
+
+
+def _image_quality_values(plane: np.ndarray) -> dict[str, Any]:
+    """Calculate bounded, deterministic QC metrics from a level-0 image plane."""
+    sampled = np.asarray(_bounded_plane_sample(plane), dtype=np.float64)
+    finite_mask = np.isfinite(sampled)
+    finite = sampled[finite_mask]
+    if not finite.size:
+        return {
+            "sample_count": 0,
+            "finite_fraction": 0.0,
+            **{
+                name: None
+                for name in IMAGE_QUALITY_COLUMNS[7:22]
+            },
+        }
+
+    filled = sampled.copy()
+    median = float(np.median(finite))
+    filled[~finite_mask] = median
+    mean = float(np.mean(finite))
+    stddev = float(np.std(finite))
+    mad = float(np.median(np.abs(finite - median)))
+    p01, p99 = (float(value) for value in np.percentile(finite, (1, 99)))
+    minimum, maximum = float(np.min(finite)), float(np.max(finite))
+    minimal_fraction = float(np.mean(finite == minimum))
+    maximal_fraction = float(np.mean(finite == maximum))
+
+    gradient_y, gradient_x = np.gradient(filled)
+    gradient_energy = float(np.mean(gradient_x * gradient_x + gradient_y * gradient_y))
+    laplacian = (
+        -4.0 * filled
+        + np.roll(filled, 1, axis=0)
+        + np.roll(filled, -1, axis=0)
+        + np.roll(filled, 1, axis=1)
+        + np.roll(filled, -1, axis=1)
+    )
+    if filled.shape[0] > 2 and filled.shape[1] > 2:
+        laplacian = laplacian[1:-1, 1:-1]
+    focus_score = float(np.var(laplacian))
+
+    blocks = _block_means(filled)
+    block_mean = float(np.mean(blocks)) if blocks.size else mean
+    illumination_block_cv = (
+        float(np.std(blocks) / abs(block_mean)) if block_mean != 0 else None
+    )
+    border_y = max(1, filled.shape[0] // 5)
+    border_x = max(1, filled.shape[1] // 5)
+    edge_mask = np.ones(filled.shape, dtype=bool)
+    if filled.shape[0] > 2 * border_y and filled.shape[1] > 2 * border_x:
+        edge_mask[border_y:-border_y, border_x:-border_x] = False
+    center_y = max(1, filled.shape[0] // 4)
+    center_x = max(1, filled.shape[1] // 4)
+    center = filled[center_y:-center_y or None, center_x:-center_x or None]
+    edge_mean = float(np.mean(filled[edge_mask]))
+    center_mean = float(np.mean(center)) if center.size else mean
+    edge_center_ratio = edge_mean / center_mean if center_mean != 0 else None
+
+    fit_stride = max(1, int(math.ceil(max(filled.shape) / 128)))
+    fitted = filled[::fit_stride, ::fit_stride]
+    yy, xx = np.indices(fitted.shape, dtype=np.float64)
+    design = np.column_stack(
+        (xx.ravel(), yy.ravel(), np.ones(fitted.size, dtype=np.float64))
+    )
+    coefficients, *_ = np.linalg.lstsq(design, fitted.ravel(), rcond=None)
+    diagonal = math.hypot(max(fitted.shape[1] - 1, 1), max(fitted.shape[0] - 1, 1))
+    fitted_gradient = (
+        float(math.hypot(coefficients[0], coefficients[1]) * diagonal / abs(mean))
+        if mean != 0
+        else None
+    )
+
+    robust_sigma = 1.4826 * mad
+    bright_threshold = median + 6.0 * robust_sigma
+    if robust_sigma == 0:
+        bright_threshold = (
+            median + 0.5 * (p99 - median)
+            if p99 > median
+            else float("inf")
+        )
+    bright_mask = finite_mask & (sampled > bright_threshold)
+    bright_area_fraction = float(np.mean(bright_mask))
+    largest_fraction = 0.0
+    if np.any(bright_mask):
+        from skimage.measure import label
+
+        components = label(bright_mask, connectivity=1)
+        component_counts = np.bincount(components.ravel())[1:]
+        if component_counts.size:
+            largest_fraction = float(component_counts.max() / sampled.size)
+
+    return {
+        "sample_count": int(finite.size),
+        "finite_fraction": float(finite.size / sampled.size),
+        "focus_score": focus_score,
+        "gradient_energy": gradient_energy,
+        "intensity_mean": mean,
+        "intensity_median": median,
+        "intensity_stddev": stddev,
+        "intensity_mad": mad,
+        "intensity_p01": p01,
+        "intensity_p99": p99,
+        "minimal_pixel_fraction": minimal_fraction,
+        "maximal_pixel_fraction": maximal_fraction,
+        "illumination_block_cv": illumination_block_cv,
+        "edge_center_ratio": edge_center_ratio,
+        "illumination_fitted_gradient": fitted_gradient,
+        "bright_area_fraction": bright_area_fraction,
+        "largest_bright_component_fraction": largest_fraction,
+    }
+
+
+def _robust_z_scores(values: list[float | None]) -> list[float]:
+    available = np.asarray(
+        [float(value) for value in values if value is not None and np.isfinite(value)],
+        dtype=np.float64,
+    )
+    if available.size < 2:
+        return [0.0 for _ in values]
+    center = float(np.median(available))
+    scale = 1.4826 * float(np.median(np.abs(available - center)))
+    if scale <= np.finfo(np.float64).eps:
+        scale = float(np.std(available))
+    if scale <= np.finfo(np.float64).eps:
+        scale = 1.0
+    return [
+        (float(value) - center) / scale
+        if value is not None and np.isfinite(value)
+        else 0.0
+        for value in values
+    ]
+
+
+def _score_image_quality(records: list[dict[str, Any]]) -> None:
+    peers: dict[tuple[int, int, int], list[dict[str, Any]]] = {}
+    for record in records:
+        peers.setdefault(
+            (record["channel_index"], record["timepoint"], record["z_index"]), []
+        ).append(record)
+    for group in peers.values():
+        z_scores = {
+            name: _robust_z_scores([record.get(name) for record in group])
+            for name in (
+                "focus_score",
+                "gradient_energy",
+                "intensity_median",
+                "minimal_pixel_fraction",
+                "maximal_pixel_fraction",
+                "illumination_block_cv",
+                "edge_center_ratio",
+                "illumination_fitted_gradient",
+                "bright_area_fraction",
+                "largest_bright_component_fraction",
+            )
+        }
+        for index, record in enumerate(group):
+            focus = max(
+                0.0,
+                -z_scores["focus_score"][index],
+                -z_scores["gradient_energy"][index],
+            )
+            intensity = abs(z_scores["intensity_median"][index])
+            saturation = max(
+                0.0,
+                z_scores["minimal_pixel_fraction"][index],
+                z_scores["maximal_pixel_fraction"][index],
+            )
+            illumination = max(
+                0.0,
+                z_scores["illumination_block_cv"][index],
+                abs(z_scores["edge_center_ratio"][index]),
+                z_scores["illumination_fitted_gradient"][index],
+            )
+            artifact = max(
+                0.0,
+                z_scores["bright_area_fraction"][index],
+                z_scores["largest_bright_component_fraction"][index],
+            )
+            score = max(focus, intensity, saturation, illumination, artifact)
+            reasons = []
+            for component, reason in (
+                (focus, "low focus relative to peer fields"),
+                (intensity, "unusual intensity relative to peer fields"),
+                (saturation, "unusual clipping fraction relative to peer fields"),
+                (illumination, "unusual illumination relative to peer fields"),
+                (artifact, "unusual bright-area pattern relative to peer fields"),
+            ):
+                if component >= 3.0:
+                    reasons.append(reason)
+            if max(
+                record["minimal_pixel_fraction"] or 0.0,
+                record["maximal_pixel_fraction"] or 0.0,
+            ) >= 0.05:
+                reasons.append("at least 5% of sampled pixels share an extreme value")
+            if (record["largest_bright_component_fraction"] or 0.0) >= 0.20:
+                reasons.append("large robust bright-area component")
+            record.update(
+                {
+                    "focus_anomaly_score": focus,
+                    "intensity_anomaly_score": intensity,
+                    "saturation_anomaly_score": saturation,
+                    "illumination_anomaly_score": illumination,
+                    "artifact_anomaly_score": artifact,
+                    "anomaly_score": score,
+                    "review_candidate": bool(score >= 3.0 or reasons),
+                    "review_reasons": json.dumps(sorted(set(reasons))),
+                }
+            )
+
+
+def _quality_rows(records: list[dict[str, Any]]) -> list[tuple]:
+    _score_image_quality(records)
+    return [
+        tuple(record[column] for column in IMAGE_QUALITY_COLUMNS)
+        for record in records
+    ]
+
+
+def _field_quality_rows(
+    field_records: list[dict[str, Any]],
+    image_quality_records: list[dict[str, Any]],
+) -> list[tuple]:
+    image_scores: dict[tuple[int, int], float] = {}
+    image_candidates: dict[tuple[int, int], bool] = {}
+    for quality in image_quality_records:
+        key = (quality["image_id"], quality["timepoint"])
+        image_scores[key] = max(image_scores.get(key, 0.0), quality["anomaly_score"])
+        image_candidates[key] = image_candidates.get(key, False) or bool(
+            quality["review_candidate"]
+        )
+    peers: dict[int, list[dict[str, Any]]] = {}
+    for record in field_records:
+        peers.setdefault(record["timepoint"], []).append(record)
+    next_id = 0
+    rows = []
+    for group in peers.values():
+        count_z = _robust_z_scores([record["cell_count"] for record in group])
+        for index, record in enumerate(group):
+            next_id += 1
+            cell_z = count_z[index]
+            zero = record["cell_count"] == 0
+            low, high = cell_z <= -3.0, cell_z >= 3.0
+            image_score = image_scores.get(
+                (record["image_id"], record["timepoint"]), 0.0
+            )
+            anomaly = max(image_score, abs(cell_z))
+            reasons = []
+            if zero:
+                reasons.append("zero cells")
+            elif low:
+                reasons.append("unusually low cell count relative to peer fields")
+            elif high:
+                reasons.append("unusually high cell count relative to peer fields")
+            if image_candidates.get((record["image_id"], record["timepoint"]), False):
+                reasons.append("one or more image planes are review candidates")
+            row = {
+                "field_quality_id": next_id,
+                **record,
+                "cell_count_robust_z": cell_z,
+                "zero_cell_count": zero,
+                "unusually_low_cell_count": low,
+                "unusually_high_cell_count": high,
+                "image_anomaly_score": image_score,
+                "anomaly_score": anomaly,
+                "review_candidate": bool(reasons),
+                "review_reasons": json.dumps(reasons),
+            }
+            rows.append(tuple(row[column] for column in FIELD_QUALITY_COLUMNS))
+    return rows
+
+
 def _relation_name(source_overlap: int, source_count: int, target_count: int) -> str:
     if source_overlap == source_count == target_count:
         return "identical_extent"
@@ -802,7 +1183,17 @@ def write_measurements_database(
         candidate.unlink(missing_ok=True)
     started = time.perf_counter()
     writer = None
-    counts = {"images": 0, "label_sets": 0, "objects": 0, "intensities": 0, "relationships": 0}
+    counts = {
+        "images": 0,
+        "label_sets": 0,
+        "objects": 0,
+        "intensities": 0,
+        "image_quality": 0,
+        "field_quality": 0,
+        "relationships": 0,
+    }
+    image_quality_records: list[dict[str, Any]] = []
+    field_quality_records: list[dict[str, Any]] = []
     next_image_id = next_channel_id = next_label_set_id = 0
     next_object_id = next_relationship_id = 0
     try:
@@ -857,6 +1248,23 @@ def write_measurements_database(
                 channel_ids.append(next_channel_id)
                 channel_rows.append((next_channel_id, image_id, channel_index, channel_name, color))
             writer.insert("channels", ("channel_id", "image_id", "channel_index", "channel_name", "channel_color"), channel_rows)
+            for timepoint in range(t):
+                for channel_offset, channel_id in enumerate(channel_ids):
+                    for z_index in range(z):
+                        image_quality_id = len(image_quality_records) + 1
+                        image_quality_records.append(
+                            {
+                                "image_quality_id": image_quality_id,
+                                "image_id": image_id,
+                                "channel_id": channel_id,
+                                "channel_index": channel_offset + 1,
+                                "timepoint": timepoint,
+                                "z_index": z_index,
+                                **_image_quality_values(
+                                    source.data[timepoint, channel_offset, z_index]
+                                ),
+                            }
+                        )
 
             label_names = result.channel_labels or [f"labels_{result.target}"]
             label_group_names = _label_group_names(result)
@@ -917,6 +1325,7 @@ def write_measurements_database(
             for timepoint in range(result.labels.shape[0]):
                 arrays = [np.asarray(result.labels[timepoint, index], dtype=np.uint32) for index in range(result.labels.shape[1])]
                 object_maps: list[dict[int, dict[str, Any]]] = []
+                field_type_counts: dict[str, int] = {}
                 for label_index, labels in enumerate(arrays):
                     object_rows = []
                     intensity_rows = []
@@ -930,6 +1339,9 @@ def write_measurements_database(
                             scales=source.scales,
                         )
                         object_type = _object_type(label_names[label_index])
+                        field_type_counts[object_type] = (
+                            field_type_counts.get(object_type, 0) + 1
+                        )
                         prefix = (
                             next_object_id, image_id, label_set_ids[label_index],
                             timepoint, label_value, object_type,
@@ -948,6 +1360,20 @@ def write_measurements_database(
                     counts["objects"] += len(object_rows)
                     counts["intensities"] += len(intensity_rows)
                     object_maps.append(object_map)
+
+                field_quality_records.append(
+                    {
+                        "image_id": image_id,
+                        "timepoint": timepoint,
+                        "cell_count": field_type_counts.get("cells", 0),
+                        "nucleus_count": field_type_counts.get("nuclei", 0),
+                        "foci_count": sum(
+                            field_type_counts.get(name, 0)
+                            for name in ("foci", "spots", "bacteria")
+                        ),
+                        "total_label_count": sum(field_type_counts.values()),
+                    }
+                )
 
                 for first_index in range(len(arrays)):
                     for second_index in range(first_index + 1, len(arrays)):
@@ -972,6 +1398,22 @@ def write_measurements_database(
                     f"  measured {source.resource.name}: "
                     f"objects={counts['objects']}, relationships={counts['relationships']}"
                 )
+        image_quality_rows = _quality_rows(image_quality_records)
+        writer.insert(
+            "image_quality_measurements",
+            IMAGE_QUALITY_COLUMNS,
+            image_quality_rows,
+        )
+        field_quality_rows = _field_quality_rows(
+            field_quality_records, image_quality_records
+        )
+        writer.insert(
+            "field_quality_measurements",
+            FIELD_QUALITY_COLUMNS,
+            field_quality_rows,
+        )
+        counts["image_quality"] = len(image_quality_rows)
+        counts["field_quality"] = len(field_quality_rows)
         writer.finish()
         if output_path.exists():
             output_path.unlink()

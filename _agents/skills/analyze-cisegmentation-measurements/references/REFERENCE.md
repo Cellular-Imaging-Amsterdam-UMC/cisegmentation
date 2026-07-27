@@ -71,6 +71,13 @@ pixel coordinate × axis scale
 Bounding-box minima are inclusive and maxima are exclusive, matching NumPy
 slicing.
 
+Schema v4 additionally calculates bounded image-QC metrics directly from
+level-0 pixels already in memory. Expensive calculations use a deterministic
+regular grid capped at 1,048,576 samples per plane. Scores compare fields
+within the same run, channel index, timepoint, and Z plane. They identify
+**review candidates** for inspection; they do not establish that an image is
+bad.
+
 ## Tables
 
 ### `schema_info`
@@ -197,7 +204,30 @@ only where the object's final mask is nonzero:
 - median absolute deviation;
 - 10th, 25th, 75th, and 90th percentiles;
 - coefficient of variation, `standard deviation / mean`, with `NULL` for mean
-  zero.
+zero.
+
+### `image_quality_measurements` (schema v4)
+
+One row per image/field × timepoint × Z plane × original channel:
+
+- focus score (variance of the discrete Laplacian) and gradient energy;
+- mean, median, population standard deviation, MAD, P1 and P99;
+- fractions equal to the sampled minimum and maximum;
+- illumination block CV, edge/center ratio and normalized fitted gradient;
+- robust bright-area and largest connected bright-component fractions;
+- plate-relative component and overall anomaly scores;
+- `review_candidate` and JSON `review_reasons`.
+
+The minimum/maximum fractions are acquisition-range proxies. Confirm the
+channel data type and display range before calling them clipping. Older
+schema-v3 databases do not contain this table; report that image-QC metrics
+are unavailable and continue using object measurements.
+
+### `field_quality_measurements` (schema v4)
+
+One row per image/field × timepoint with cell, nucleus, foci and total label
+counts, plate-relative cell-count score, zero/low/high count flags, the maximum
+image anomaly score, and review-candidate provenance.
 
 For a point-only Spotiflow object, all statistics describe its single sampled
 pixel. They are consequently equal except variance, standard deviation, median
@@ -235,6 +265,10 @@ separate primary nucleus/cytoplasm relationships.
 
 - `object_features`: objects joined with image and label-set context.
 - `intensity_features`: intensity rows joined with object and channel names.
+- `image_quality_features`: image-QC rows joined with image, plate and channel
+  context (schema v4).
+- `field_quality_summary`: field counts and review-candidate scores joined
+  with plate and navigation context (schema v4).
 - `label_sources`: output label sets joined with their producing step, model,
   channel role, one-based input channel index, and input channel name.
 - `object_navigation`: one row per object with output store UUID, output
@@ -329,6 +363,47 @@ The database has no environment-specific OMERO Image or Plate ID. Obtain it
 from the authenticated active OMERO context and compare the viewer store UUID
 with `output_store_uuid` before opening a field or rendering an ROI.
 
+### Cell with most assigned foci, including render navigation
+
+This returns the winning cell and every assigned focus in one query. A
+successful result should be cached and cited by the render call; do not issue
+separate schema or navigation queries.
+
+```sql
+WITH focus_counts AS (
+    SELECT target_object_id AS cell_object_id, COUNT(*) AS foci_count
+    FROM foci_assignments
+    WHERE target_object_type = 'cells'
+      AND relation IN ('inside', 'identical_extent')
+    GROUP BY target_object_id
+),
+winner AS (
+    SELECT cell_object_id, foci_count
+    FROM focus_counts
+    ORDER BY foci_count DESC, cell_object_id
+    LIMIT 1
+)
+SELECT w.foci_count,
+       cell.object_id AS cell_object_id,
+       cell.output_store_uuid, cell.output_resource_path,
+       cell.output_label_path AS cell_label_path,
+       cell.label_value AS cell_label_value,
+       cell.timepoint, cell.centroid_z_px,
+       cell.bbox_min_y_px, cell.bbox_min_x_px,
+       cell.bbox_max_y_px, cell.bbox_max_x_px,
+       focus.object_id AS focus_object_id,
+       focus.output_label_path AS focus_label_path,
+       focus.label_value AS focus_label_value
+FROM winner w
+JOIN object_navigation cell ON cell.object_id = w.cell_object_id
+LEFT JOIN foci_assignments a
+  ON a.target_object_id = w.cell_object_id
+ AND a.target_object_type = 'cells'
+ AND a.relation IN ('inside', 'identical_extent')
+LEFT JOIN object_navigation focus ON focus.object_id = a.source_object_id
+ORDER BY focus.object_id
+```
+
 ### Assigned foci by compartment
 
 ```sql
@@ -350,6 +425,31 @@ FROM object_features
 WHERE object_type = 'cells'
 GROUP BY plate_row, plate_column
 ORDER BY plate_row, plate_column
+```
+
+### Field review candidates
+
+```sql
+SELECT plate_row, plate_column, field_index, image_name, timepoint,
+       cell_count, cell_count_robust_z, image_anomaly_score, anomaly_score,
+       review_reasons
+FROM field_quality_summary
+WHERE review_candidate
+ORDER BY anomaly_score DESC, plate_row, plate_column, field_index
+LIMIT 25
+```
+
+### Segmentation-QC gallery candidates
+
+```sql
+SELECT object_id, object_type, image_name, plate_row, plate_column, field_index,
+       area_px2, solidity, aspect_ratio, euler_number,
+       output_resource_path, output_label_path, label_value,
+       bbox_min_y_px, bbox_min_x_px, bbox_max_y_px, bbox_max_x_px
+FROM object_navigation
+WHERE object_type = 'cells'
+ORDER BY solidity ASC, area_px2 DESC
+LIMIT 25
 ```
 
 Run filters and aggregation inside the database before using `.df()` or
