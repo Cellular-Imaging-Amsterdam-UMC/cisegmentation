@@ -37,6 +37,7 @@ FOCI_MODELS = (
 SKIP = "skip"
 EXPANSION_PREFIX = "expand:"
 MEASUREMENT_DATABASE_FORMATS = ("duckdb", "sqlite", "skip")
+OUTPUT_NAME_POSTFIX = "__cisegmentation"
 
 
 @dataclass

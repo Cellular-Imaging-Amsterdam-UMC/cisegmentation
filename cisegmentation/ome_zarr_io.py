@@ -8,6 +8,7 @@ import re
 import shutil
 import time
 from typing import Any, Iterable
+from uuid import uuid4
 
 import numpy as np
 
@@ -91,6 +92,17 @@ def _set_write_timing(group, write_started: float) -> None:
     metadata["timings"] = _finalize_timings(
         metadata.get("timings"), time.perf_counter() - write_started
     )
+    group.attrs["cisegmentation"] = metadata
+
+
+def new_output_store_uuid() -> str:
+    """Return the portable identity shared by an output store and its database."""
+    return str(uuid4())
+
+
+def _set_output_store_uuid(group, output_store_uuid: str) -> None:
+    metadata = dict(_attrs(group).get("cisegmentation", {}))
+    metadata["output_store_uuid"] = output_store_uuid
     group.attrs["cisegmentation"] = metadata
 
 
@@ -642,7 +654,12 @@ def _write_native_ome_zarr_labels(group, result: LabelResult, name: str) -> None
     )
 
 
-def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
+def write_label_image(
+    result: LabelResult,
+    output_path: str | Path,
+    *,
+    output_store_uuid: str | None = None,
+) -> Path:
     import zarr
 
     write_started = time.perf_counter()
@@ -657,6 +674,7 @@ def write_label_image(result: LabelResult, output_path: str | Path) -> Path:
         else _write_image_group
     )
     writer(root, result, output_path.name.removesuffix(".ome.zarr"))
+    _set_output_store_uuid(root, output_store_uuid or new_output_store_uuid())
     _set_write_timing(root, write_started)
     root.store.close()
     if output_path.exists():
@@ -775,6 +793,8 @@ class HCSPlateWriter:
         self,
         resources: Iterable[ImageResource],
         output_path: str | Path,
+        *,
+        output_store_uuid: str | None = None,
     ) -> None:
         import zarr
 
@@ -784,6 +804,7 @@ class HCSPlateWriter:
         if any(resource.plate_path is None for resource in self.resources):
             raise ValueError("Every HCS resource must have a plate field path")
         self.output_path = Path(output_path)
+        self.output_store_uuid = output_store_uuid or new_output_store_uuid()
         self.temporary = self.output_path.with_name(self.output_path.name + ".partial")
         if self.temporary.exists():
             shutil.rmtree(self.temporary)
@@ -918,6 +939,7 @@ class HCSPlateWriter:
             "model": self._model_id,
             "target": self._target,
             "source": self._source_name,
+            "output_store_uuid": self.output_store_uuid,
             "field_count": len(self._written_paths),
             "model_cache_hits": self._model_cache_hits,
             "model_cache_misses": self._model_cache_misses,
@@ -939,12 +961,19 @@ class HCSPlateWriter:
             shutil.rmtree(self.temporary)
 
 
-def write_hcs_plate(results: Iterable[LabelResult], output_path: str | Path) -> Path:
+def write_hcs_plate(
+    results: Iterable[LabelResult],
+    output_path: str | Path,
+    *,
+    output_store_uuid: str | None = None,
+) -> Path:
     result_list = list(results)
     if not result_list:
         raise ValueError("Cannot write an empty HCS result")
     writer = HCSPlateWriter(
-        [result.source.resource for result in result_list], output_path
+        [result.source.resource for result in result_list],
+        output_path,
+        output_store_uuid=output_store_uuid,
     )
     try:
         for result in result_list:

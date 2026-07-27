@@ -17,14 +17,14 @@ The beginner **Create Measurements Database** selector offers:
 The database is written next to the segmentation OME-Zarr:
 
 ```text
-sample_multistep.ome.zarr
-sample_multistep_measurements.duckdb
+sample__cisegmentation.ome.zarr
+sample__cisegmentation_measurements.duckdb
 ```
 
 or, for SQLite:
 
 ```text
-sample_multistep_measurements.sqlite
+sample__cisegmentation_measurements.sqlite
 ```
 
 Database creation is atomic. A completed database is installed only after all
@@ -68,6 +68,8 @@ One row describing the workflow run:
 - measurement schema version;
 - database format;
 - source OME-Zarr and output OME-Zarr;
+- `output_store_uuid`, also stored in the output OME-Zarr root
+  `cisegmentation` metadata for portable identity checks;
 - complete workflow settings as JSON.
 
 ### `images`
@@ -98,7 +100,18 @@ Duplicate Step 3 selections remain separate label sets through
 
 `locations_only` distinguishes Spotiflow point locations from true masks.
 `output_label_path` identifies the corresponding OME-Zarr label group or image
-channel.
+channel. `output_label_kind` is `label-image` for a native OME-Zarr label
+group or `image-channel` for a label appended to the main image. The latter
+also has a one-based `output_channel_index`.
+
+### `label_set_sources`
+
+One or more rows link each output label set to the original input channel(s)
+used to produce it. Each row records the producing workflow step, model,
+channel role (`primary` or `nuclei`), and a `channel_id` link to `channels`.
+Derived cytoplasm can therefore reference both the cell and nucleus inference
+inputs. The `label_sources` convenience view adds the one-based channel index
+and channel name.
 
 ### `objects`
 
@@ -203,6 +216,11 @@ and separate primary nucleus/cytoplasm relationships.
 
 - `object_features`: objects joined with image and label-set context.
 - `intensity_features`: intensity rows joined with object and channel names.
+- `label_sources`: output label sets joined with their producing step, model,
+  channel role, one-based input channel index, and input channel name.
+- `object_navigation`: one row per measured object with output store identity,
+  HCS field path, label storage location, label value, centroid, half-open
+  pixel bounds, image dimensions, and calibration for viewer navigation.
 - `mask_relationships`: relationships with source/target types and label names.
 - `foci_assignments`: primary spot/foci/bacteria relationships to cells,
   nuclei, and cytoplasm.
@@ -216,7 +234,7 @@ DuckDB performs filtering and aggregation before creating a pandas DataFrame:
 
 import duckdb
 
-db = duckdb.connect("screen_multistep_measurements.duckdb", read_only=True)
+db = duckdb.connect("screen__cisegmentation_measurements.duckdb", read_only=True)
 
 cells = db.sql("""
     SELECT image_name, plate_row, plate_column, field_index,
@@ -236,6 +254,34 @@ cell_signal = db.sql("""
     WHERE object_type = 'cells' AND channel_name = 'Cytoplasm'
 """).df()
 ```
+
+Origin channels for every label set:
+
+```python
+label_origins = db.sql("""
+    SELECT label_name, source_step, source_model, channel_role,
+           channel_index, channel_name
+    FROM label_sources
+    ORDER BY label_set_index, source_step, channel_role
+""").df()
+```
+
+Navigation data for one cell:
+
+```python
+cell_roi = db.sql("""
+    SELECT output_store_uuid, output_resource_path, output_label_kind,
+           output_label_path, output_channel_index, label_value, timepoint,
+           centroid_z_px, centroid_y_px, centroid_x_px,
+           bbox_min_y_px, bbox_min_x_px, bbox_max_y_px, bbox_max_x_px
+    FROM object_navigation
+    WHERE object_id = ?
+""", params=[cell_object_id]).df()
+```
+
+The database deliberately does not contain environment-specific OMERO IDs.
+An OMERO client must supply the active Image or Plate ID and verify
+`output_store_uuid` against the viewer capability before navigating.
 
 Count nuclear and cytoplasmic foci per cell:
 
@@ -285,7 +331,7 @@ SQLite requires only Python's standard library. Pandas can execute the same SQL:
 import sqlite3
 import pandas as pd
 
-db = sqlite3.connect("screen_multistep_measurements.sqlite")
+db = sqlite3.connect("screen__cisegmentation_measurements.sqlite")
 
 cells = pd.read_sql_query("""
     SELECT * FROM object_features

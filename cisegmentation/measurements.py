@@ -13,10 +13,11 @@ from typing import Any, Callable, Iterable
 import numpy as np
 
 from . import __version__
-from .ome_zarr_io import LabelResult, _label_group_names
+from .ome_zarr_io import LabelResult, _label_group_names, new_output_store_uuid
+from .settings import OUTPUT_NAME_POSTFIX
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 DATABASE_FORMATS = {"duckdb": ".duckdb", "sqlite": ".sqlite"}
 
 
@@ -70,6 +71,7 @@ CREATE TABLE measurement_runs (
     database_format TEXT NOT NULL,
     source_store TEXT NOT NULL,
     output_ome_zarr TEXT NOT NULL,
+    output_store_uuid TEXT NOT NULL,
     settings_json TEXT NOT NULL
 );
 CREATE TABLE images (
@@ -107,7 +109,17 @@ CREATE TABLE label_sets (
     label_name TEXT NOT NULL,
     object_type TEXT NOT NULL,
     locations_only BOOLEAN NOT NULL,
-    output_label_path TEXT NOT NULL
+    output_label_path TEXT NOT NULL,
+    output_label_kind TEXT NOT NULL,
+    output_channel_index INTEGER
+);
+CREATE TABLE label_set_sources (
+    label_set_id BIGINT NOT NULL,
+    channel_id BIGINT NOT NULL,
+    channel_role TEXT NOT NULL,
+    source_step TEXT NOT NULL,
+    source_model TEXT NOT NULL,
+    PRIMARY KEY (label_set_id, channel_id, channel_role, source_step)
 );
 CREATE TABLE objects (
     object_id BIGINT PRIMARY KEY,
@@ -226,6 +238,27 @@ FROM intensity_measurements m
 JOIN objects o ON o.object_id = m.object_id
 JOIN channels c ON c.channel_id = m.channel_id;
 
+CREATE VIEW label_sources AS
+SELECT s.label_set_id, ls.image_id, ls.label_set_index, ls.label_name,
+       ls.object_type, s.source_step, s.source_model, s.channel_role,
+       c.channel_id, c.channel_index, c.channel_name
+FROM label_set_sources s
+JOIN label_sets ls ON ls.label_set_id = s.label_set_id
+JOIN channels c ON c.channel_id = s.channel_id;
+
+CREATE VIEW object_navigation AS
+SELECT o.*, mr.output_store_uuid, mr.output_ome_zarr,
+       i.source_store, i.source_resource_path, i.output_resource_path,
+       i.image_name, i.plate_row, i.plate_column, i.field_index,
+       i.size_t, i.size_c, i.size_z, i.size_y, i.size_x,
+       i.scale_t, i.scale_z_um, i.scale_y_um, i.scale_x_um,
+       ls.label_name, ls.locations_only, ls.output_label_path,
+       ls.output_label_kind, ls.output_channel_index
+FROM objects o
+JOIN images i ON i.image_id = o.image_id
+JOIN measurement_runs mr ON mr.run_id = i.run_id
+JOIN label_sets ls ON ls.label_set_id = o.label_set_id;
+
 CREATE VIEW mask_relationships AS
 SELECT r.*, so.object_type AS source_object_type, sl.label_name AS source_label_name,
        tobj.object_type AS target_object_type, tl.label_name AS target_label_name
@@ -295,6 +328,7 @@ class _DatabaseWriter:
             "CREATE UNIQUE INDEX idx_images_resource ON images(source_store, source_resource_path)",
             "CREATE UNIQUE INDEX idx_channels_image_channel ON channels(image_id, channel_index)",
             "CREATE UNIQUE INDEX idx_label_sets_image_index ON label_sets(image_id, label_set_index)",
+            "CREATE INDEX idx_label_set_sources_channel ON label_set_sources(channel_id, label_set_id)",
             "CREATE UNIQUE INDEX idx_objects_label ON objects(label_set_id, timepoint, label_value)",
             "CREATE INDEX idx_objects_image_type ON objects(image_id, object_type)",
             "CREATE INDEX idx_intensity_channel ON intensity_measurements(channel_id, object_id)",
@@ -320,7 +354,8 @@ def measurement_database_path(
     if database_format not in DATABASE_FORMATS:
         raise ValueError(f"Unsupported measurement database: {database_format}")
     return Path(output_dir) / (
-        f"{source_name}_multistep_measurements{DATABASE_FORMATS[database_format]}"
+        f"{source_name}{OUTPUT_NAME_POSTFIX}_measurements"
+        f"{DATABASE_FORMATS[database_format]}"
     )
 
 
@@ -368,6 +403,86 @@ def _location_flags(result: LabelResult) -> list[bool]:
         and not bool(parameters.get("spotiflow_local_refinement"))
         for name in (result.channel_labels or [f"labels_{result.target}"])
     ]
+
+
+def _label_source_runs(result: LabelResult) -> list[list[dict[str, Any]]]:
+    """Map each output label set to the inference run(s) that produced it."""
+    label_names = result.channel_labels or [f"labels_{result.target}"]
+    first_timepoint_runs = [
+        run
+        for run in (result.provenance.get("step_runs") or [])
+        if int(run.get("timepoint", 0)) == 0
+    ]
+    cell_run = next(
+        (
+            run
+            for run in first_timepoint_runs
+            if run.get("step") in ("Step 1 cells", "Step 1 expansion nuclei")
+        ),
+        None,
+    )
+    nucleus_run = next(
+        (run for run in first_timepoint_runs if run.get("step") == "Step 2 nuclei"),
+        None,
+    )
+    if nucleus_run is None and cell_run is not None:
+        if cell_run.get("step") == "Step 1 expansion nuclei":
+            nucleus_run = cell_run
+    foci_runs = iter(
+        run
+        for run in first_timepoint_runs
+        if str(run.get("step", "")).startswith("Step 3")
+    )
+
+    sources: list[list[dict[str, Any]]] = []
+    for label_name in label_names:
+        object_type = _object_type(label_name)
+        if object_type == "cells":
+            runs = [cell_run] if cell_run is not None else []
+        elif object_type == "nuclei":
+            runs = [nucleus_run] if nucleus_run is not None else []
+        elif object_type == "cytoplasm":
+            runs = [
+                run
+                for run in (cell_run, nucleus_run)
+                if run is not None
+            ]
+        elif object_type in ("spots", "foci", "bacteria"):
+            run = next(foci_runs, None)
+            runs = [run] if run is not None else []
+        else:
+            runs = []
+        sources.append(runs)
+    return sources
+
+
+def _label_source_rows(
+    result: LabelResult,
+    label_set_ids: list[int],
+    channel_ids: list[int],
+) -> list[tuple]:
+    rows: list[tuple] = []
+    seen: set[tuple] = set()
+    for label_set_id, runs in zip(label_set_ids, _label_source_runs(result)):
+        for run in runs:
+            channels = [("primary", int(run.get("primary_channel", 0)))]
+            nuclei_channel = int(run.get("nuclei_channel", 0))
+            if nuclei_channel > 0 and nuclei_channel != channels[0][1]:
+                channels.append(("nuclei", nuclei_channel))
+            for channel_role, channel_index in channels:
+                if channel_index < 1 or channel_index > len(channel_ids):
+                    continue
+                row = (
+                    label_set_id,
+                    channel_ids[channel_index - 1],
+                    channel_role,
+                    str(run.get("step") or "unknown"),
+                    str(run.get("model") or "unknown"),
+                )
+                if row not in seen:
+                    seen.add(row)
+                    rows.append(row)
+    return rows
 
 
 def _safe_property(region, name: str) -> float | None:
@@ -668,6 +783,7 @@ def write_measurements_database(
     database_format: str,
     *,
     output_ome_zarr: str | Path,
+    output_store_uuid: str | None = None,
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Measure completed label results and atomically write one relational database."""
@@ -679,6 +795,7 @@ def write_measurements_database(
         raise ValueError("Cannot measure an empty result collection")
     if database_format not in DATABASE_FORMATS:
         raise ValueError(f"Unsupported measurement database: {database_format}")
+    output_store_uuid = output_store_uuid or new_output_store_uuid()
     output_path = Path(output_path)
     temporary = output_path.with_name(output_path.name + ".partial")
     for candidate in (temporary, Path(str(temporary) + ".wal"), Path(str(temporary) + "-journal")):
@@ -699,7 +816,7 @@ def write_measurements_database(
         ])
         writer.insert(
             "measurement_runs",
-            ("run_id", "created_utc", "software_version", "schema_version", "database_format", "source_store", "output_ome_zarr", "settings_json"),
+            ("run_id", "created_utc", "software_version", "schema_version", "database_format", "source_store", "output_ome_zarr", "output_store_uuid", "settings_json"),
             [(
                 1,
                 datetime.now(timezone.utc).isoformat(),
@@ -708,6 +825,7 @@ def write_measurements_database(
                 database_format,
                 first.source.resource.store_path.name,
                 str(output_ome_zarr),
+                output_store_uuid,
                 json.dumps(settings, sort_keys=True),
             )],
         )
@@ -753,6 +871,8 @@ def write_measurements_database(
                     label_path = (
                         f"{prefix}labels/{label_group_names[label_index]}"
                     )
+                    label_kind = "label-image"
+                    output_channel = None
                 else:
                     original_channels = (
                         source.data.shape[1] if result.include_original_channels else 0
@@ -761,11 +881,38 @@ def write_measurements_database(
                     label_path = (
                         f"{output_resource or '/'}:channel:{output_channel}"
                     )
+                    label_kind = "image-channel"
                 label_set_rows.append((
                     next_label_set_id, image_id, label_index + 1, label_name,
                     _object_type(label_name), bool(locations[label_index]), label_path,
+                    label_kind, output_channel,
                 ))
-            writer.insert("label_sets", ("label_set_id", "image_id", "label_set_index", "label_name", "object_type", "locations_only", "output_label_path"), label_set_rows)
+            writer.insert(
+                "label_sets",
+                (
+                    "label_set_id",
+                    "image_id",
+                    "label_set_index",
+                    "label_name",
+                    "object_type",
+                    "locations_only",
+                    "output_label_path",
+                    "output_label_kind",
+                    "output_channel_index",
+                ),
+                label_set_rows,
+            )
+            writer.insert(
+                "label_set_sources",
+                (
+                    "label_set_id",
+                    "channel_id",
+                    "channel_role",
+                    "source_step",
+                    "source_model",
+                ),
+                _label_source_rows(result, label_set_ids, channel_ids),
+            )
 
             for timepoint in range(result.labels.shape[0]):
                 arrays = [np.asarray(result.labels[timepoint, index], dtype=np.uint32) for index in range(result.labels.shape[1])]

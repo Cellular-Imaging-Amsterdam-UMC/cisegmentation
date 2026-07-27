@@ -11,7 +11,12 @@ from cisegmentation.measurements import (
     measurement_database_path,
     write_measurements_database,
 )
-from cisegmentation.ome_zarr_io import ImageData, ImageResource, LabelResult
+from cisegmentation.ome_zarr_io import (
+    ImageData,
+    ImageResource,
+    LabelResult,
+    write_label_image,
+)
 from cisegmentation.settings import SegmentationSettings
 
 
@@ -51,6 +56,29 @@ def _measurement_result(tmp_path: Path) -> LabelResult:
         "multi-step",
         provenance={
             "parameters": {"spotiflow_local_refinement": False},
+            "step_runs": [
+                {
+                    "step": "Step 1 cells",
+                    "timepoint": 0,
+                    "model": "cellpose3:cyto3",
+                    "primary_channel": 2,
+                    "nuclei_channel": 1,
+                },
+                {
+                    "step": "Step 2 nuclei",
+                    "timepoint": 0,
+                    "model": "cellpose3:nuclei",
+                    "primary_channel": 1,
+                    "nuclei_channel": 0,
+                },
+                {
+                    "step": "Step 3a spots",
+                    "timepoint": 0,
+                    "model": "spotiflow:general",
+                    "primary_channel": 1,
+                    "nuclei_channel": 0,
+                },
+            ],
             "output_statistics": [
                 {"locations_only": False},
                 {"locations_only": False},
@@ -88,6 +116,7 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
         output,
         database_format,
         output_ome_zarr=tmp_path / "result.ome.zarr",
+        output_store_uuid="842ae25c-3237-4458-92bf-0ed0ee676fa7",
     )
 
     assert output.is_file()
@@ -96,6 +125,52 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
     assert summary["relationships"] > 0
     assert _query(output, database_format, "SELECT COUNT(*) FROM images") == [(1,)]
     assert _query(output, database_format, "SELECT COUNT(*) FROM intensity_features") == [(10,)]
+    assert _query(
+        output,
+        database_format,
+        "SELECT value FROM schema_info WHERE key='schema_version'",
+    ) == [("3",)]
+    assert _query(
+        output,
+        database_format,
+        """
+        SELECT output_store_uuid, output_resource_path, output_label_kind,
+               output_label_path, output_channel_index, label_value,
+               bbox_min_y_px, bbox_max_y_px, size_y, scale_y_um
+        FROM object_navigation
+        WHERE object_type='cells'
+        """,
+    ) == [
+        (
+            "842ae25c-3237-4458-92bf-0ed0ee676fa7",
+            "A/1/0",
+            "image-channel",
+            "A/1/0:channel:1",
+            1,
+            1,
+            1,
+            5,
+            6,
+            0.5,
+        )
+    ]
+    assert _query(
+        output,
+        database_format,
+        """
+        SELECT label_name, source_step, channel_role, channel_index, channel_name
+        FROM label_sources
+        ORDER BY label_set_index, source_step, channel_role
+        """,
+    ) == [
+        ("labels_cells", "Step 1 cells", "nuclei", 1, "Signal"),
+        ("labels_cells", "Step 1 cells", "primary", 2, "Reference"),
+        ("labels_nuclei", "Step 2 nuclei", "primary", 1, "Signal"),
+        ("labels_cytoplasm", "Step 1 cells", "nuclei", 1, "Signal"),
+        ("labels_cytoplasm", "Step 1 cells", "primary", 2, "Reference"),
+        ("labels_cytoplasm", "Step 2 nuclei", "primary", 1, "Signal"),
+        ("labels_spots_channel_1", "Step 3a spots", "primary", 1, "Signal"),
+    ]
 
     cell = _query(
         output,
@@ -146,10 +221,10 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
 
 def test_measurement_database_path_is_one_file_per_input_store(tmp_path):
     assert measurement_database_path(tmp_path, "plate", "duckdb") == (
-        tmp_path / "plate_multistep_measurements.duckdb"
+        tmp_path / "plate__cisegmentation_measurements.duckdb"
     )
     assert measurement_database_path(tmp_path, "plate", "sqlite") == (
-        tmp_path / "plate_multistep_measurements.sqlite"
+        tmp_path / "plate__cisegmentation_measurements.sqlite"
     )
 
 
@@ -164,12 +239,15 @@ def test_output_label_paths_match_native_groups_and_appended_channels(tmp_path):
     assert _query(
         native_path,
         "sqlite",
-        "SELECT output_label_path FROM label_sets ORDER BY label_set_index",
+        """
+        SELECT output_label_path, output_label_kind, output_channel_index
+        FROM label_sets ORDER BY label_set_index
+        """,
     ) == [
-        ("A/1/0/labels/labels_duplicate",),
-        ("A/1/0/labels/labels_duplicate_2",),
-        ("A/1/0/labels/labels_duplicate_3",),
-        ("A/1/0/labels/labels_duplicate_4",),
+        ("A/1/0/labels/labels_duplicate", "label-image", None),
+        ("A/1/0/labels/labels_duplicate_2", "label-image", None),
+        ("A/1/0/labels/labels_duplicate_3", "label-image", None),
+        ("A/1/0/labels/labels_duplicate_4", "label-image", None),
     ]
 
     channels = _measurement_result(tmp_path)
@@ -181,13 +259,47 @@ def test_output_label_paths_match_native_groups_and_appended_channels(tmp_path):
     assert _query(
         channels_path,
         "sqlite",
-        "SELECT output_label_path FROM label_sets ORDER BY label_set_index",
+        """
+        SELECT output_label_path, output_label_kind, output_channel_index
+        FROM label_sets ORDER BY label_set_index
+        """,
     ) == [
-        ("A/1/0:channel:3",),
-        ("A/1/0:channel:4",),
-        ("A/1/0:channel:5",),
-        ("A/1/0:channel:6",),
+        ("A/1/0:channel:3", "image-channel", 3),
+        ("A/1/0:channel:4", "image-channel", 4),
+        ("A/1/0:channel:5", "image-channel", 5),
+        ("A/1/0:channel:6", "image-channel", 6),
     ]
+
+
+def test_output_store_uuid_matches_zarr_and_database(tmp_path):
+    import zarr
+
+    result = _measurement_result(tmp_path)
+    result.source.resource.image_path = ""
+    result.source.resource.plate_path = None
+    result.write_ome_zarr_labels = True
+    store_uuid = "3935615d-a18d-41d8-af04-e63cfec3a46c"
+    zarr_path = write_label_image(
+        result,
+        tmp_path / "result.ome.zarr",
+        output_store_uuid=store_uuid,
+    )
+    database_path = tmp_path / "result.sqlite"
+    write_measurements_database(
+        [result],
+        database_path,
+        "sqlite",
+        output_ome_zarr=zarr_path,
+        output_store_uuid=store_uuid,
+    )
+
+    root = zarr.open_group(str(zarr_path), mode="r")
+    assert root.attrs["cisegmentation"]["output_store_uuid"] == store_uuid
+    assert _query(
+        database_path,
+        "sqlite",
+        "SELECT output_store_uuid FROM measurement_runs",
+    ) == [(store_uuid,)]
 
 
 def test_workflow_writes_database_next_to_output_and_skip_omits_it(
@@ -209,7 +321,7 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         lambda *_args, **_kwargs: result,
     )
 
-    def fake_write(_result, path):
+    def fake_write(_result, path, **_kwargs):
         Path(path).mkdir(parents=True, exist_ok=True)
         return Path(path)
 
@@ -222,8 +334,8 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         SegmentationSettings(measurements_database="sqlite"),
     )
     assert outputs == [
-        output_dir / "sample_multistep.ome.zarr",
-        output_dir / "sample_multistep_measurements.sqlite",
+        output_dir / "sample__cisegmentation.ome.zarr",
+        output_dir / "sample__cisegmentation_measurements.sqlite",
     ]
     assert outputs[1].is_file()
 
@@ -232,7 +344,7 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         output_dir,
         SegmentationSettings(measurements_database="skip"),
     )
-    assert skip_outputs == [output_dir / "sample_multistep.ome.zarr"]
+    assert skip_outputs == [output_dir / "sample__cisegmentation.ome.zarr"]
 
 
 def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
@@ -267,7 +379,7 @@ def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
         return result_by_path[image.resource.image_path]
 
     class FakePlateWriter:
-        def __init__(self, _resources, _output_path):
+        def __init__(self, _resources, _output_path, **_kwargs):
             pass
 
         def append(self, result):
@@ -316,6 +428,6 @@ def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
         "finalize",
     ]
     assert outputs == [
-        output_dir / "plate_multistep.ome.zarr",
-        output_dir / "plate_multistep_measurements.sqlite",
+        output_dir / "plate__cisegmentation.ome.zarr",
+        output_dir / "plate__cisegmentation_measurements.sqlite",
     ]

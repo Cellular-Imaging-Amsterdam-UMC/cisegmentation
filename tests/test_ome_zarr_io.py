@@ -115,8 +115,15 @@ def test_hcs_root_aggregates_result_reuse_counts(inputfolder, outputfolder):
         },
     )
 
-    output = write_hcs_plate([result], outputfolder / "plate-result.ome.zarr")
+    output = write_hcs_plate(
+        [result],
+        outputfolder / "plate-result.ome.zarr",
+        output_store_uuid="e976fd49-41df-45ca-b5bb-ec186facf26f",
+    )
     root = zarr.open_group(str(output), mode="r")
+    assert root.attrs["cisegmentation"]["output_store_uuid"] == (
+        "e976fd49-41df-45ca-b5bb-ec186facf26f"
+    )
     assert root.attrs["cisegmentation"]["result_cache_hits"] == 2
     assert root.attrs["cisegmentation"]["timings"]["local_refinement_seconds"] == 0.5
 

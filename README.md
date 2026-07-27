@@ -8,11 +8,15 @@ and Spotiflow with optional local mask refinement from one CUDA 12.6 environment
 ## Workflow contract
 
 - Input: one or more top-level `.ome.zarr` stores in `/data/in`, including HCS plates.
-- Normal output: standalone nonnegative `int32` label OME-Zarrs in `/data/out`.
+- Normal output: `<source>__cisegmentation.ome.zarr` in `/data/out`, containing
+  standalone nonnegative `int32` labels.
   Signed 32-bit storage preserves instance IDs while remaining readable by
   QuPath 0.7.0, whose Bio-Formats image server rejects `uint32` tiles.
 - Benchmark output: **only** `benchmark_gallery_<image>.ome.zarr`.
 - Axes are normalized to `TCZYX`; time and Z are preserved in normal runs.
+- Output OME-Zarrs and schema-v3 measurement databases share an
+  `output_store_uuid`; `object_navigation` supplies portable field, label, and
+  ROI coordinates without embedding deployment-specific OMERO IDs.
 - Spotiflow points become uniquely numbered single pixels or voxels by default.
   Advanced local refinement can replace 2D or slice-wise points with bounded,
   locally thresholded instance masks.

@@ -30,14 +30,14 @@ The **Create Measurements Database** selector offers:
 The database is written next to the segmentation OME-Zarr:
 
 ```text
-sample_multistep.ome.zarr
-sample_multistep_measurements.duckdb
+sample__cisegmentation.ome.zarr
+sample__cisegmentation_measurements.duckdb
 ```
 
 or:
 
 ```text
-sample_multistep_measurements.sqlite
+sample__cisegmentation_measurements.sqlite
 ```
 
 Database creation is atomic. A completed database is installed only after all
@@ -87,6 +87,8 @@ One row describing the workflow run:
 - measurement schema version;
 - database format;
 - source OME-Zarr and output OME-Zarr;
+- `output_store_uuid`, shared with the output OME-Zarr root
+  `cisegmentation.output_store_uuid` metadata;
 - complete workflow settings as JSON.
 
 ### `images`
@@ -117,7 +119,16 @@ Duplicate Step 3 selections remain separate label sets through
 
 `locations_only` distinguishes Spotiflow point locations from true masks.
 `output_label_path` identifies the corresponding OME-Zarr label group or image
-channel.
+channel. `output_label_kind` is either `label-image` or `image-channel`;
+appended label channels also record their one-based `output_channel_index`.
+
+### `label_set_sources`
+
+One or more rows link each output label set to the original input channel(s)
+used to produce it. Each row records the producing workflow step, model,
+channel role (`primary` or `nuclei`), and a `channel_id` link to `channels`.
+Derived cytoplasm may reference both cell and nucleus inputs. Use the
+`label_sources` view to read the one-based channel index and channel name.
 
 ### `objects`
 
@@ -224,6 +235,11 @@ separate primary nucleus/cytoplasm relationships.
 
 - `object_features`: objects joined with image and label-set context.
 - `intensity_features`: intensity rows joined with object and channel names.
+- `label_sources`: output label sets joined with their producing step, model,
+  channel role, one-based input channel index, and input channel name.
+- `object_navigation`: one row per object with output store UUID, output
+  OME-Zarr and HCS field path, label storage location, label value, centroid,
+  half-open pixel bounding box, image dimensions, and calibration.
 - `mask_relationships`: relationships with source/target types and label names.
 - `foci_assignments`: primary spot/foci/bacteria relationships to cells,
   nuclei, and cytoplasm.
@@ -288,6 +304,30 @@ FROM intensity_features
 WHERE object_type = 'cells'
   AND channel_name = 'Cytoplasm'
 ```
+
+### Producing channels for label sets
+
+```sql
+SELECT label_name, source_step, source_model, channel_role,
+       channel_index, channel_name
+FROM label_sources
+ORDER BY label_set_index, source_step, channel_role
+```
+
+### Navigate to a measured object
+
+```sql
+SELECT output_store_uuid, output_resource_path, output_label_kind,
+       output_label_path, output_channel_index, label_value, timepoint,
+       centroid_z_px, centroid_y_px, centroid_x_px,
+       bbox_min_y_px, bbox_min_x_px, bbox_max_y_px, bbox_max_x_px
+FROM object_navigation
+WHERE object_id = ?
+```
+
+The database has no environment-specific OMERO Image or Plate ID. Obtain it
+from the authenticated active OMERO context and compare the viewer store UUID
+with `output_store_uuid` before opening a field or rendering an ROI.
 
 ### Assigned foci by compartment
 

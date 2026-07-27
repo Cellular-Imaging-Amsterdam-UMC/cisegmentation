@@ -16,6 +16,7 @@ from .ome_zarr_io import (
     LabelResult,
     discover_ome_zarrs,
     enumerate_resources,
+    new_output_store_uuid,
     read_image,
     write_label_image,
 )
@@ -29,7 +30,7 @@ from .reporting import (
     step_record,
     workflow_report_lines,
 )
-from .settings import SKIP, SegmentationSettings
+from .settings import OUTPUT_NAME_POSTFIX, SKIP, SegmentationSettings
 
 
 _INFERENCE_CACHE_SETTING_NAMES = (
@@ -653,11 +654,11 @@ def run_workflow(
                 f"One or more eligible benchmark models failed; gallery retained at {gallery}"
             )
         return [gallery]
-    model_name = "multistep"
     for store in stores:
         resources = enumerate_resources(store)
         source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
-        output_path = output_dir / f"{source_name}_{model_name}.ome.zarr"
+        output_path = output_dir / f"{source_name}{OUTPUT_NAME_POSTFIX}.ome.zarr"
+        output_store_uuid = new_output_store_uuid()
 
         def segment_results():
             nonlocal startup_remaining
@@ -693,7 +694,11 @@ def run_workflow(
         if resources[0].plate_path is None:
             results = list(segment_results())
             emit(log, f"Writing output: {output_path}")
-            write_label_image(results[0], output_path)
+            write_label_image(
+                results[0],
+                output_path,
+                output_store_uuid=output_store_uuid,
+            )
             if write_measurements_database is not None and database_path is not None:
                 emit(
                     log,
@@ -705,11 +710,16 @@ def run_workflow(
                     database_path,
                     settings.measurements_database,
                     output_ome_zarr=output_path,
+                    output_store_uuid=output_store_uuid,
                     log=log,
                 )
         else:
             emit(log, f"Streaming HCS output field by field: {output_path}")
-            plate_writer = HCSPlateWriter(resources, output_path)
+            plate_writer = HCSPlateWriter(
+                resources,
+                output_path,
+                output_store_uuid=output_store_uuid,
+            )
 
             def write_plate_fields():
                 for index, result in enumerate(segment_results(), start=1):
@@ -733,6 +743,7 @@ def run_workflow(
                         database_path,
                         settings.measurements_database,
                         output_ome_zarr=output_path,
+                        output_store_uuid=output_store_uuid,
                         log=log,
                     )
                 else:

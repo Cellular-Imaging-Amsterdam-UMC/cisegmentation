@@ -1,12 +1,20 @@
 ---
 name: analyze-cisegmentation-measurements
 description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite. Use in JupyterLite AI for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
+metadata:
+  version: "2"
+  biomero-purpose: "attachment-analysis"
+  biomero-consumers: "omero-analysis-chat,omero-jupyterlite"
+  biomero-auto-activate: "true"
+  biomero-file-extensions: ".duckdb,.sqlite"
+  biomero-filename-globs: "*__cisegmentation_measurements.duckdb,*__cisegmentation_measurements.sqlite"
+  biomero-required-tables: "schema_info,measurement_runs"
 ---
 
 # Instructions
 
-Help the user inspect and analyze a CI Segmentation measurements database in
-JupyterLite.
+Help the user inspect and analyze an attached CI Segmentation measurements
+database in OMERO Analysis Chat or JupyterLite.
 
 ## Load the reference
 
@@ -30,12 +38,12 @@ measurement semantics, convenience views, and query examples.
 
 ## Workflow
 
-1. Identify the uploaded `.duckdb` or `.sqlite` file.
+1. Identify the attached or uploaded `.duckdb` or `.sqlite` file.
 2. Open the database read-only.
 3. Inspect its actual tables, views, and columns before drafting a substantive
    query. Do not assume every database uses the latest schema.
 4. Read `schema_info` and `measurement_runs` when schema version, provenance,
-   workflow settings, or source and output paths matter.
+   workflow settings, output store identity, or source and output paths matter.
 5. Prefer the documented convenience views when they contain the needed
    context.
 6. Filter and aggregate in SQL before returning data to pandas.
@@ -44,6 +52,8 @@ measurement semantics, convenience views, and query examples.
 8. Close the database connection.
 
 ## JupyterLite constraints
+
+Apply these constraints only when working in JupyterLite:
 
 - Use paths in the JupyterLite browser filesystem.
 - Do not use host-computer paths, shell commands, Docker, or Conda.
@@ -61,7 +71,7 @@ Open DuckDB read-only:
 ```python
 import duckdb
 
-db_path = "screen_multistep_measurements.duckdb"
+db_path = "screen__cisegmentation_measurements.duckdb"
 db = duckdb.connect(db_path, read_only=True)
 ```
 
@@ -71,7 +81,7 @@ Open SQLite read-only:
 from pathlib import Path
 import sqlite3
 
-db_path = Path("screen_multistep_measurements.sqlite").resolve()
+db_path = Path("screen__cisegmentation_measurements.sqlite").resolve()
 db = sqlite3.connect(
     f"file:{db_path.as_posix()}?mode=ro",
     uri=True,
@@ -97,6 +107,11 @@ database_files
 - Treat pixel coordinates and timepoints as zero-based.
 - Treat `channel_index` as one-based.
 - Treat bounding-box minima as inclusive and maxima as exclusive.
+- Use `object_navigation` for viewer/ROI coordinates when schema version 3 or
+  newer provides it. Never invent an OMERO Image or Plate ID from a portable
+  database.
+- Treat `output_store_uuid` as the cross-check between a database and an
+  active output OME-Zarr. Refuse navigation when both UUIDs exist and differ.
 - Do not substitute pixel units for unavailable physical units.
 - Interpret relationships directionally; do not interchange source and target.
 - Distinguish 2D masks, true 3D masks, and point-only objects.
