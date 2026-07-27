@@ -7,6 +7,11 @@ bounded SQL query that returns the ranking metric and complete
 `zarr-render-v2` request for a single crop or one `zarr-gallery-v1` request for
 up to 25 panels. Cite the successful analysis evidence ID.
 
+For galleries, return the complete evidence contract as
+`result = {"store_uuid": store_uuid, "render_panels": panels}` and copy those
+panels unchanged into the render call. A shortened table is useful for display
+but is not sufficient render evidence.
+
 Do not ask “render now?” or “go?” when the target, channels, crop, and overlays
 are already known. Do not claim object tracking unless the database contains
 tracking relationships.

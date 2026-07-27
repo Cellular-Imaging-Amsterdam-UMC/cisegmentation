@@ -55,6 +55,14 @@ For questions whose answer should be a PNG, load
 `references/PNG_QUESTIONS.md` only when needed. Prefer a single bounded gallery
 request over one render request per object.
 
+For a gallery, the analysis result is also the render contract. Assign
+`result = {"store_uuid": store_uuid, "render_panels": panels}` and include
+every panel's exact field, ROI, source channels, overlay paths and values,
+T/Z, title, and caption. Do not return only a shortened display table or rely
+on another Python variable: consumers receive only `result`. Copy
+`render_panels` unchanged into the gallery tool so label values cannot become
+detached from their field and bounding box.
+
 ## JupyterLite constraints
 
 Apply these constraints only when working in JupyterLite:

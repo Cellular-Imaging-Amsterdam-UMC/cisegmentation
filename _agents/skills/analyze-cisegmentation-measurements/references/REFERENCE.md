@@ -404,6 +404,57 @@ LEFT JOIN object_navigation focus ON focus.object_id = a.source_object_id
 ORDER BY focus.object_id
 ```
 
+### Top-cell gallery render contract
+
+For a ranked gallery, keep each cell's navigation fields and assigned focus
+rows together while grouping. Build one bounded panel dictionary per selected
+cell with these exact snake-case keys:
+
+```python
+panel = {
+    "field": output_resource_path,
+    "roi": [x0, y0, x1, y1],
+    "source_channels": [source_channel],
+    "t": timepoint,
+    "z": z_index,
+    "title": f"Cell {cell_label_value}",
+    "caption": f"{foci_count} assigned foci",
+    "overlays": [
+        {
+            "label_path": cell_label_path,
+            "values": [cell_label_value],
+            "mode": "outline",
+            "color": "#FFFF00",
+            "opacity": 1,
+            "outline_width": 2,
+            "name": "cell",
+        },
+        {
+            "label_path": focus_label_path,
+            "values": focus_label_values,
+            "mode": "outline",
+            "color": "#FF00FF",
+            "opacity": 1,
+            "outline_width": 2,
+            "name": "foci",
+        },
+    ],
+}
+```
+
+The only Python value returned to the assistant is the global `result`.
+Return the complete render contract, not a shortened preview:
+
+```python
+result = {
+    "store_uuid": store_uuid,
+    "render_panels": panels,
+}
+```
+
+Copy `render_panels` unchanged into the gallery call. Never reconstruct label
+values from titles, row positions, object IDs, or a separate summary table.
+
 ### Assigned foci by compartment
 
 ```sql
