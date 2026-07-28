@@ -2,9 +2,9 @@
 name: analyze-cisegmentation-measurements
 description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite. Use in JupyterLite AI for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
 metadata:
-  version: "3"
+  version: "4"
   biomero-purpose: "attachment-analysis"
-  biomero-consumers: "omero-analysis-chat,omero-jupyterlite"
+  biomero-consumers: "omero-analysis,omero-jupyterlite"
   biomero-auto-activate: "true"
   biomero-file-extensions: ".duckdb,.sqlite"
   biomero-filename-globs: "*__cisegmentation_measurements.duckdb,*__cisegmentation_measurements.sqlite"
@@ -16,7 +16,7 @@ metadata:
 # Instructions
 
 Help the user inspect and analyze an attached CI Segmentation measurements
-database in OMERO Analysis Chat or JupyterLite.
+database in OMERO Analysis or JupyterLite.
 
 ## Required reference
 

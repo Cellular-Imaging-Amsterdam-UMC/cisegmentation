@@ -20,7 +20,7 @@ def test_portable_skills_follow_biomero_catalog_contract():
     expected = {
         "analyze-cisegmentation-measurements": {
             "biomero-purpose": "attachment-analysis",
-            "biomero-consumers": "omero-analysis-chat,omero-jupyterlite",
+            "biomero-consumers": "omero-analysis,omero-jupyterlite",
             "biomero-auto-activate": "true",
         },
         "use-cisegmentation-workflow": {
