@@ -22,7 +22,7 @@ measurements.
 
 The **Create Measurements Database** selector offers:
 
-- `DuckDB` (default): best for large analytical queries and JupyterLite.
+- `DuckDB` (default): best for large analytical queries and browser-local Analysis.
 - `SQLite`: maximum compatibility with Python's standard library and database
   tools.
 - `Skip`: do not calculate or write measurements.

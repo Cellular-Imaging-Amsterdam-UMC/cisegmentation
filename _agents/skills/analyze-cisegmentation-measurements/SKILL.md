@@ -1,10 +1,10 @@
 ---
 name: analyze-cisegmentation-measurements
-description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite. Use in JupyterLite AI for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
+description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
 metadata:
   version: "4"
   biomero-purpose: "attachment-analysis"
-  biomero-consumers: "omero-analysis,omero-jupyterlite"
+  biomero-consumers: "omero-analysis"
   biomero-auto-activate: "true"
   biomero-file-extensions: ".duckdb,.sqlite"
   biomero-filename-globs: "*__cisegmentation_measurements.duckdb,*__cisegmentation_measurements.sqlite"
@@ -16,7 +16,7 @@ metadata:
 # Instructions
 
 Help the user inspect and analyze an attached CI Segmentation measurements
-database in OMERO Analysis or JupyterLite.
+database in OMERO Analysis Chat.
 
 ## Required reference
 
@@ -62,19 +62,6 @@ T/Z, title, and caption. Do not return only a shortened display table or rely
 on another Python variable: consumers receive only `result`. Copy
 `render_panels` unchanged into the gallery tool so label values cannot become
 detached from their field and bounding box.
-
-## JupyterLite constraints
-
-Apply these constraints only when working in JupyterLite:
-
-- Use paths in the JupyterLite browser filesystem.
-- Do not use host-computer paths, shell commands, Docker, or Conda.
-- Expect browser execution to be single-threaded and memory-limited.
-- Avoid loading whole multi-million-row tables into pandas.
-- Install DuckDB with `%pip install duckdb` in a notebook cell if importing it
-  fails.
-- Use Python's standard-library `sqlite3` module for SQLite.
-- Never overwrite the uploaded database.
 
 ## Database connections
 

@@ -10,7 +10,7 @@ measurements.
 
 The beginner **Create Measurements Database** selector offers:
 
-- `DuckDB` (default): best for large analytical queries and JupyterLite.
+- `DuckDB` (default): best for large analytical queries and browser-local Analysis.
 - `SQLite`: maximum compatibility with Python's standard library and database tools.
 - `Skip`: do not calculate or write measurements.
 
@@ -230,8 +230,6 @@ and separate primary nucleus/cytoplasm relationships.
 DuckDB performs filtering and aggregation before creating a pandas DataFrame:
 
 ```python
-%pip install duckdb  # needed once in a new Jupyter/JupyterLite environment
-
 import duckdb
 
 db = duckdb.connect("screen__cisegmentation_measurements.duckdb", read_only=True)
@@ -315,13 +313,10 @@ Close the file when finished:
 db.close()
 ```
 
-In JupyterLite, upload the `.duckdb` file through the file browser. Current
-Pyodide-based JupyterLite environments can install DuckDB's WebAssembly build
-with `%pip install duckdb`; see DuckDB's
-[browser-Python guide](https://duckdb.org/2024/10/02/pyodide). Browser execution
-is single-threaded, so keep large queries inside DuckDB and return only filtered
-or aggregated results with `.df()`; avoid converting an entire
-multi-million-row table to pandas.
+In OMERO Analysis, attach the `.duckdb` file to the current OMERO object or add
+it as Workspace data. Browser execution is single-threaded, so keep large
+queries inside DuckDB and return only filtered or aggregated results with
+`.df()`; avoid converting an entire multi-million-row table to pandas.
 
 ## Reading SQLite
 
