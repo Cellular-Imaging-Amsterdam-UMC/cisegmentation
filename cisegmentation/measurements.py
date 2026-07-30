@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from itertools import chain
 import json
 import math
 import os
@@ -17,7 +16,7 @@ from .ome_zarr_io import LabelResult, _label_group_names, new_output_store_uuid
 from .settings import OUTPUT_NAME_POSTFIX
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 DATABASE_FORMATS = {"duckdb": ".duckdb", "sqlite": ".sqlite"}
 QUALITY_SAMPLE_PIXELS = 1_048_576
 
@@ -129,6 +128,7 @@ CREATE TABLE label_sets (
     image_id BIGINT NOT NULL,
     label_set_index INTEGER NOT NULL,
     label_name TEXT NOT NULL,
+    label_origin TEXT NOT NULL,
     object_type TEXT NOT NULL,
     locations_only BOOLEAN NOT NULL,
     output_label_path TEXT NOT NULL,
@@ -526,7 +526,11 @@ def _label_source_runs(result: LabelResult) -> list[list[dict[str, Any]]]:
     )
 
     sources: list[list[dict[str, Any]]] = []
-    for label_name in label_names:
+    origins = result.label_origins or ["generated"] * len(label_names)
+    for label_name, origin in zip(label_names, origins):
+        if origin == "existing":
+            sources.append([])
+            continue
         object_type = _object_type(label_name)
         if object_type == "cells":
             runs = [cell_run] if cell_run is not None else []
@@ -1196,6 +1200,21 @@ def write_measurements_database(
     field_quality_records: list[dict[str, Any]] = []
     next_image_id = next_channel_id = next_label_set_id = 0
     next_object_id = next_relationship_id = 0
+    iterator_wait_seconds = 0.0
+
+    def measured_results(first_result):
+        nonlocal iterator_wait_seconds
+        yield first_result
+        while True:
+            wait_started = time.perf_counter()
+            try:
+                result = next(result_iterator)
+            except StopIteration:
+                iterator_wait_seconds += time.perf_counter() - wait_started
+                return
+            iterator_wait_seconds += time.perf_counter() - wait_started
+            yield result
+
     try:
         writer = _DatabaseWriter(temporary, database_format)
         settings = first.provenance.get("parameters") or {}
@@ -1220,7 +1239,7 @@ def write_measurements_database(
                 json.dumps(settings, sort_keys=True),
             )],
         )
-        all_results = chain((first,), result_iterator)
+        all_results = measured_results(first)
         first = None
         for result in all_results:
             next_image_id += 1
@@ -1271,29 +1290,19 @@ def write_measurements_database(
             locations = _location_flags(result)
             label_set_ids = []
             label_set_rows = []
+            origins = result.label_origins or ["generated"] * len(label_names)
             for label_index, label_name in enumerate(label_names):
                 next_label_set_id += 1
                 label_set_ids.append(next_label_set_id)
-                if result.write_ome_zarr_labels:
-                    prefix = f"{output_resource}/" if output_resource else ""
-                    label_path = (
-                        f"{prefix}labels/{label_group_names[label_index]}"
-                    )
-                    label_kind = "label-image"
-                    output_channel = None
-                else:
-                    original_channels = (
-                        source.data.shape[1] if result.include_original_channels else 0
-                    )
-                    output_channel = original_channels + label_index + 1
-                    label_path = (
-                        f"{output_resource or '/'}:channel:{output_channel}"
-                    )
-                    label_kind = "image-channel"
+                prefix = f"{output_resource}/" if output_resource else ""
+                label_path = f"{prefix}labels/{label_group_names[label_index]}"
+                label_kind = "label-image"
+                output_channel = None
                 label_set_rows.append((
                     next_label_set_id, image_id, label_index + 1, label_name,
-                    _object_type(label_name), bool(locations[label_index]), label_path,
-                    label_kind, output_channel,
+                    origins[label_index], _object_type(label_name),
+                    bool(locations[label_index]), label_path, label_kind,
+                    output_channel,
                 ))
             writer.insert(
                 "label_sets",
@@ -1302,6 +1311,7 @@ def write_measurements_database(
                     "image_id",
                     "label_set_index",
                     "label_name",
+                    "label_origin",
                     "object_type",
                     "locations_only",
                     "output_label_path",
@@ -1424,7 +1434,7 @@ def write_measurements_database(
         for candidate in (temporary, Path(str(temporary) + ".wal"), Path(str(temporary) + "-journal")):
             candidate.unlink(missing_ok=True)
         raise
-    counts["runtime_seconds"] = time.perf_counter() - started
+    counts["runtime_seconds"] = time.perf_counter() - started - iterator_wait_seconds
     counts["path"] = str(output_path)
     counts["format"] = database_format
     return counts

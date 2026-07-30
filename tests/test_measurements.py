@@ -130,7 +130,7 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
         output,
         database_format,
         "SELECT value FROM schema_info WHERE key='schema_version'",
-    ) == [("4",)]
+    ) == [("5",)]
     assert summary["image_quality"] == 2
     assert summary["field_quality"] == 1
     assert _query(
@@ -168,9 +168,9 @@ def test_measurements_database_contains_shapes_intensities_and_relationships(
         (
             "842ae25c-3237-4458-92bf-0ed0ee676fa7",
             "A/1/0",
-            "image-channel",
-            "A/1/0:channel:1",
-            1,
+            "label-image",
+            "A/1/0/labels/labels_cells",
+            None,
             1,
             1,
             5,
@@ -279,10 +279,10 @@ def test_synthetic_image_quality_metrics_rank_expected_artifacts():
     assert debris_qc["largest_bright_component_fraction"] > 0.05
 
 
-def test_output_label_paths_match_native_groups_and_appended_channels(tmp_path):
+def test_output_label_paths_are_native_groups_with_origins(tmp_path):
     native = _measurement_result(tmp_path)
     native.channel_labels = ["labels duplicate"] * 4
-    native.write_ome_zarr_labels = True
+    native.label_origins = ["generated", "existing", "generated", "existing"]
     native_path = tmp_path / "native.sqlite"
     write_measurements_database(
         [native], native_path, "sqlite", output_ome_zarr="output.ome.zarr"
@@ -291,34 +291,15 @@ def test_output_label_paths_match_native_groups_and_appended_channels(tmp_path):
         native_path,
         "sqlite",
         """
-        SELECT output_label_path, output_label_kind, output_channel_index
+        SELECT output_label_path, output_label_kind, output_channel_index,
+               label_origin
         FROM label_sets ORDER BY label_set_index
         """,
     ) == [
-        ("A/1/0/labels/labels_duplicate", "label-image", None),
-        ("A/1/0/labels/labels_duplicate_2", "label-image", None),
-        ("A/1/0/labels/labels_duplicate_3", "label-image", None),
-        ("A/1/0/labels/labels_duplicate_4", "label-image", None),
-    ]
-
-    channels = _measurement_result(tmp_path)
-    channels.include_original_channels = True
-    channels_path = tmp_path / "channels.sqlite"
-    write_measurements_database(
-        [channels], channels_path, "sqlite", output_ome_zarr="output.ome.zarr"
-    )
-    assert _query(
-        channels_path,
-        "sqlite",
-        """
-        SELECT output_label_path, output_label_kind, output_channel_index
-        FROM label_sets ORDER BY label_set_index
-        """,
-    ) == [
-        ("A/1/0:channel:3", "image-channel", 3),
-        ("A/1/0:channel:4", "image-channel", 4),
-        ("A/1/0:channel:5", "image-channel", 5),
-        ("A/1/0:channel:6", "image-channel", 6),
+        ("A/1/0/labels/labels_duplicate", "label-image", None, "generated"),
+        ("A/1/0/labels/labels_duplicate_2", "label-image", None, "existing"),
+        ("A/1/0/labels/labels_duplicate_3", "label-image", None, "generated"),
+        ("A/1/0/labels/labels_duplicate_4", "label-image", None, "existing"),
     ]
 
 
@@ -328,7 +309,6 @@ def test_output_store_uuid_matches_zarr_and_database(tmp_path):
     result = _measurement_result(tmp_path)
     result.source.resource.image_path = ""
     result.source.resource.plate_path = None
-    result.write_ome_zarr_labels = True
     store_uuid = "3935615d-a18d-41d8-af04-e63cfec3a46c"
     zarr_path = write_label_image(
         result,
@@ -377,6 +357,12 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         return Path(path)
 
     monkeypatch.setattr(engine, "write_label_image", fake_write)
+    recorded_measurements = []
+    monkeypatch.setattr(
+        engine,
+        "set_measurement_timing",
+        lambda path, seconds: recorded_measurements.append((Path(path), seconds)),
+    )
 
     output_dir = tmp_path / "output"
     outputs = engine.run_workflow(
@@ -388,6 +374,8 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
         output_dir / "sample__cisegmentation.ome.zarr",
         output_dir / "sample__cisegmentation_measurements.sqlite",
     ]
+    assert recorded_measurements[0][0] == outputs[0]
+    assert recorded_measurements[0][1] >= 0
     assert outputs[1].is_file()
 
     skip_outputs = engine.run_workflow(
@@ -458,6 +446,7 @@ def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
     monkeypatch.setattr(engine, "read_image", fake_read)
     monkeypatch.setattr(engine, "_segment_multistep_image", fake_segment)
     monkeypatch.setattr(engine, "HCSPlateWriter", FakePlateWriter)
+    monkeypatch.setattr(engine, "set_measurement_timing", lambda *_args: None)
     monkeypatch.setattr(
         "cisegmentation.measurements.write_measurements_database", fake_measure
     )

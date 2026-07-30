@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 import math
 from pathlib import Path
+import shutil
 import time
 from dataclasses import replace
 from collections.abc import Callable
@@ -18,6 +20,7 @@ from .ome_zarr_io import (
     enumerate_resources,
     new_output_store_uuid,
     read_image,
+    set_measurement_timing,
     write_label_image,
 )
 from .registry import get_model_spec
@@ -503,6 +506,9 @@ def _segment_multistep_image(
             "runtime_seconds": sum(
                 float(info.get("runtime_seconds", 0.0)) for info in infos
             ),
+            "segmentation_count": sum(
+                not bool(info.get("result_cache_hit")) for info in infos
+            ),
             **(
                 {"object_count": int(np.count_nonzero(np.unique(tczyx)))}
                 if settings.labels_log_info
@@ -546,8 +552,6 @@ def _segment_multistep_image(
             else [],
         },
         channel_labels=channel_labels,
-        include_original_channels=settings.include_original_channels,
-        write_ome_zarr_labels=settings.write_ome_zarr_labels,
     )
 def _segment_image(
     image,
@@ -592,6 +596,7 @@ def _segment_image(
             "runtime_seconds": sum(
                 float(info.get("runtime_seconds", 0.0)) for info in infos
             ),
+            "segmentation_count": len(infos),
             "object_count": int(tczyx.max(initial=0)),
             "model_cache_hits": sum(
                 int(info.get("model_cache_hits", bool(info.get("model_cache_hit"))))
@@ -609,8 +614,323 @@ def _segment_image(
             "timings": timings,
             "parameters": settings.to_dict(),
         },
-        write_ome_zarr_labels=settings.write_ome_zarr_labels,
     )
+
+
+def _write_parallel_metadata(
+    store_path: Path,
+    resources,
+    settings: SegmentationSettings,
+    finalization: dict[str, dict],
+    parallelism: dict,
+    *,
+    output_store_uuid: str,
+    startup_seconds: float,
+    label_write_seconds: float,
+    measurement_seconds: float,
+    generated_names: list[str],
+) -> None:
+    import zarr
+
+    from .ome_zarr_io import _finalize_timings
+    from .parallel_pipeline import expected_channel_labels
+
+    timing_records = [
+        item["provenance"].get("timings", {})
+        for item in finalization.values()
+    ]
+    timings = _aggregate_timings(timing_records)
+    timings["startup_seconds"] = (
+        float(timings.get("startup_seconds", 0.0))
+        + float(startup_seconds)
+    )
+    timings["measurement_seconds"] = float(measurement_seconds)
+    timings = _finalize_timings(timings, label_write_seconds)
+    root = zarr.open_group(str(store_path), mode="a")
+    metadata = dict(root.attrs.get("cisegmentation", {}))
+    metadata.update(
+        {
+            "model": "multi-step",
+            "target": "multi-step",
+            "source": resources[0].store_path.name,
+            "output_store_uuid": output_store_uuid,
+            "field_count": len(resources),
+            "runtime_seconds": sum(
+                float(item["provenance"].get("runtime_seconds", 0.0))
+                for item in finalization.values()
+            ),
+            "segmentation_count": sum(
+                int(item["provenance"].get("segmentation_count", 0))
+                for item in finalization.values()
+            ),
+            "model_cache_hits": sum(
+                int(item["provenance"].get("model_cache_hits", 0))
+                for item in finalization.values()
+            ),
+            "model_cache_misses": sum(
+                int(item["provenance"].get("model_cache_misses", 0))
+                for item in finalization.values()
+            ),
+            "result_cache_hits": sum(
+                int(item["provenance"].get("result_cache_hits", 0))
+                for item in finalization.values()
+            ),
+            "existing_labels": settings.existing_labels,
+            "include_original_data": settings.include_original_data,
+            "output_mode": (
+                "full-data"
+                if settings.include_original_data
+                else "labels-only-overlay"
+            ),
+            "generated_label_groups": generated_names,
+            "label_name_mapping": dict(
+                zip(expected_channel_labels(settings), generated_names)
+            ),
+            "parallelism": parallelism,
+            "timings": timings,
+            "parameters": settings.to_dict(),
+        }
+    )
+    root.attrs["cisegmentation"] = metadata
+    for resource in resources:
+        if not resource.image_path:
+            root_metadata = dict(root.attrs["cisegmentation"])
+            root_metadata.update(
+                {
+                    key: value
+                    for key, value in finalization[""]["provenance"].items()
+                    if key not in {
+                        "timings",
+                        "runtime_seconds",
+                        "segmentation_count",
+                        "model_cache_hits",
+                        "model_cache_misses",
+                        "result_cache_hits",
+                    }
+                }
+            )
+            root.attrs["cisegmentation"] = root_metadata
+            continue
+        group = root[resource.image_path] if resource.image_path else root
+        field_metadata = dict(group.attrs.get("cisegmentation", {}))
+        field_metadata.update(finalization[resource.image_path]["provenance"])
+        field_metadata.update(
+            {
+                "output_store_uuid": output_store_uuid,
+                "existing_labels": settings.existing_labels,
+                "include_original_data": settings.include_original_data,
+            }
+        )
+        group.attrs["cisegmentation"] = field_metadata
+    root.store.close()
+
+
+def _run_parallel_store(
+    store: Path,
+    output_dir: Path,
+    settings: SegmentationSettings,
+    *,
+    startup_seconds: float = 0.0,
+    log: Callable[[str], None] | None,
+) -> list[Path]:
+    from uuid import uuid4
+
+    from .measurements import measurement_database_path
+    from .parallel_pipeline import (
+        commit_overlay_labels,
+        expected_channel_labels,
+        finalize_label_commit,
+        prepare_label_overlay,
+        publish_consumed_store,
+        publish_overlay,
+        recover_label_commit,
+        resolve_label_policy,
+        run_inference_passes,
+        run_label_finalization,
+        write_overlay_manifest,
+    )
+
+    source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
+    output_path = output_dir / f"{source_name}{OUTPUT_NAME_POSTFIX}.ome.zarr"
+    run_id = uuid4().hex
+    stage_dir = output_dir / (
+        f".{source_name}.cisegmentation-staging-{run_id}"
+    )
+    overlay_partial = stage_dir / "label-overlay.ome.zarr"
+    shard_dir = stage_dir / "measurement-shards"
+    output_store_uuid = new_output_store_uuid()
+    database_path = (
+        measurement_database_path(
+            output_dir, source_name, settings.measurements_database
+        )
+        if settings.measurements_database != "skip"
+        else None
+    )
+    recover_label_commit(store)
+    resources = enumerate_resources(store)
+    existing_by_resource, generated_names, final_by_resource = (
+        resolve_label_policy(resources, settings)
+    )
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    emit(log, f"Temporary working directory: {stage_dir}")
+    measurement_summary = None
+    finalization: dict[str, dict] = {}
+    try:
+        prepare_label_overlay(store, overlay_partial, resources)
+        passes, records, inference_parallelism = run_inference_passes(
+            resources, settings, stage_dir, log=log
+        )
+        finalization, label_parallelism = run_label_finalization(
+            resources,
+            settings,
+            passes,
+            records,
+            stage_dir,
+            overlay_partial,
+            generated_names,
+            final_by_resource,
+            log=log,
+        )
+        label_write_seconds = float(
+            label_parallelism["zarr_write_seconds"]
+        )
+        write_overlay_manifest(
+            overlay_partial,
+            store,
+            settings,
+            resources,
+            existing_by_resource,
+            generated_names,
+            final_by_resource,
+        )
+        measurement_parallelism = {"workers": 0, "retries": 0}
+        if database_path is not None:
+            from .parallel_measurements import write_parallel_measurements
+
+            emit(
+                log,
+                f"Parallel measurements ({settings.measurements_database}) "
+                f"for {len(resources)} field(s)",
+            )
+            measurement_summary, measurement_parallelism = (
+                write_parallel_measurements(
+                    resources=resources,
+                    settings=settings,
+                    overlay_path=overlay_partial,
+                    final_by_resource=final_by_resource,
+                    generated_names=generated_names,
+                    finalization=finalization,
+                    shard_dir=shard_dir,
+                    output_path=database_path,
+                    output_ome_zarr=output_path,
+                    output_store_uuid=output_store_uuid,
+                    log=log,
+                )
+            )
+        parallelism = {
+            **inference_parallelism,
+            "label_finalization": label_parallelism,
+            "measurements": measurement_parallelism,
+        }
+        emit(
+            log,
+            "Parallel phases: "
+            f"label workers={label_parallelism['workers']}, "
+            f"label retries={label_parallelism['retries']}, "
+            f"label runtime={label_parallelism['runtime_seconds']:.2f}s, "
+            f"OME-Zarr label writes={label_write_seconds:.2f}s, "
+            f"measurement workers={measurement_parallelism['workers']}, "
+            f"measurement retries={measurement_parallelism['retries']}",
+        )
+        emit(
+            log,
+            "Publication: "
+            + (
+                "full-data move"
+                if settings.include_original_data
+                else "labels-only overlay"
+            )
+            + f", existing labels={settings.existing_labels}, "
+            + "label mapping="
+            + json.dumps(
+                dict(zip(expected_channel_labels(settings), generated_names)),
+                sort_keys=True,
+            ),
+        )
+        measurement_seconds = (
+            float(measurement_summary["runtime_seconds"])
+            if measurement_summary is not None
+            else 0.0
+        )
+        _write_parallel_metadata(
+            overlay_partial,
+            resources,
+            settings,
+            finalization,
+            parallelism,
+            output_store_uuid=output_store_uuid,
+            startup_seconds=startup_seconds,
+            label_write_seconds=label_write_seconds,
+            measurement_seconds=measurement_seconds,
+            generated_names=generated_names,
+        )
+        if settings.include_original_data:
+            commit_overlay_labels(
+                store,
+                overlay_partial,
+                resources,
+                settings,
+                existing_by_resource,
+                generated_names,
+                retain_journal=True,
+            )
+            _write_parallel_metadata(
+                store,
+                resources,
+                settings,
+                finalization,
+                parallelism,
+                output_store_uuid=output_store_uuid,
+                startup_seconds=startup_seconds,
+                label_write_seconds=label_write_seconds,
+                measurement_seconds=measurement_seconds,
+                generated_names=generated_names,
+            )
+            if overlay_partial.exists():
+                shutil.rmtree(overlay_partial)
+            if stage_dir.exists():
+                shutil.rmtree(stage_dir)
+            method = publish_consumed_store(store, output_path)
+            finalize_label_commit(output_path)
+            emit(log, f"Published full-data output by {method}: {output_path}")
+        else:
+            publish_overlay(overlay_partial, output_path)
+            if stage_dir.exists():
+                shutil.rmtree(stage_dir)
+            emit(log, f"Published labels-only overlay: {output_path}")
+    except Exception:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
+        if overlay_partial.exists():
+            shutil.rmtree(overlay_partial)
+        if database_path is not None:
+            database_path.unlink(missing_ok=True)
+        recover_label_commit(store)
+        raise
+    outputs = [output_path]
+    if measurement_summary is not None and database_path is not None:
+        outputs.append(database_path)
+        emit(
+            log,
+            "Finished measurements: "
+            f"images={measurement_summary['images']}, "
+            f"label sets={measurement_summary['label_sets']}, "
+            f"objects={measurement_summary['objects']}, "
+            f"intensity rows={measurement_summary['intensities']}, "
+            f"relationships={measurement_summary['relationships']}, "
+            f"runtime={measurement_summary['runtime_seconds']:.2f}s",
+        )
+    return outputs
 
 
 def run_workflow(
@@ -655,6 +975,17 @@ def run_workflow(
             )
         return [gallery]
     for store in stores:
+        if (store / ".zattrs").exists():
+            parallel_outputs = _run_parallel_store(
+                store,
+                output_dir,
+                settings,
+                startup_seconds=startup_remaining,
+                log=log,
+            )
+            outputs.extend(parallel_outputs)
+            startup_remaining = 0.0
+            continue
         resources = enumerate_resources(store)
         source_name = store.name.removesuffix(".ome.zarr").removesuffix(".zarr")
         output_path = output_dir / f"{source_name}{OUTPUT_NAME_POSTFIX}.ome.zarr"
@@ -753,6 +1084,10 @@ def run_workflow(
             except Exception:
                 plate_writer.abort()
                 raise
+        if measurement_summary is not None:
+            set_measurement_timing(
+                output_path, measurement_summary["runtime_seconds"]
+            )
         emit(log, f"Finished output: {output_path}")
         outputs.append(output_path)
         if measurement_summary is not None and database_path is not None:

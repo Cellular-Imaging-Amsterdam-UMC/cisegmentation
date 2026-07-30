@@ -57,8 +57,12 @@ def test_cell_expansion_channel_accepts_either_step1_field(
     assert settings.cell_expansion_channel() == expected
 
 
-def test_native_ome_zarr_labels_are_enabled_by_default():
-    assert SegmentationSettings().write_ome_zarr_labels is True
+def test_native_label_output_defaults():
+    settings = SegmentationSettings()
+    assert settings.include_original_data is True
+    assert settings.existing_labels == "overwrite"
+    assert settings.max_inference_workers == 0
+    assert settings.max_measurement_workers == 0
 
 
 def test_four_independent_foci_slots_retain_duplicate_channels():

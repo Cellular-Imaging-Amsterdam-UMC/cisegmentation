@@ -352,12 +352,13 @@ def workflow_report_lines(settings) -> list[str]:
             else "single-pixel point locations"
         ),
         f"  post-processing: remove border cells={settings.remove_border_cells}",
-        "  output: "
+        "  output: native OME-Zarr 0.4 labels; "
         + (
-            "native OME-Zarr 0.4 labels (original image retained)"
-            if settings.write_ome_zarr_labels
-            else "labels as image channels"
+            "original image retained and moved"
+            if settings.include_original_data
+            else "mergeable labels-only overlay"
         ),
+        f"  existing labels: {settings.existing_labels}",
         f"  measurements database: {settings.measurements_database}",
         f"  labels log info: {settings.labels_log_info}",
         "  effective model parameters are reported for each segmentation below",

@@ -59,10 +59,13 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["cell_nuclei_channel"]["default"] == 0
     assert parameters["nucleus_channel"]["default"] == 1
     assert all(parameters[f"foci_channel_{slot}"]["default"] == 1 for slot in range(1, 5))
-    assert parameters["include_original_channels"]["default"] is True
-    assert parameters["write_ome_zarr_labels"]["default"] is True
-    assert parameters["write_ome_zarr_labels"]["mode"] == "beginner"
-    assert parameters["write_ome_zarr_labels"]["section_id"] == "essential"
+    assert parameters["include_original_data"]["default"] is True
+    assert parameters["existing_labels"]["default"] == "overwrite"
+    assert [
+        option["value"] for option in parameters["existing_labels"]["options"]
+    ] == ["remove", "overwrite", "append"]
+    assert "include_original_channels" not in parameters
+    assert "write_ome_zarr_labels" not in parameters
     assert parameters["labels_log_info"]["default"] is False
     assert parameters["labels_log_info"]["mode"] == "advanced"
     assert parameters["labels_log_info"]["section_id"] == "advanced"
@@ -70,7 +73,6 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["smooth_stardist_labels"]["mode"] == "advanced"
     assert parameters["remove_border_cells"]["default"] is True
     assert parameters["remove_border_cells"]["mode"] == "beginner"
-    parameter_names = [item["name"] for item in config["parameters"]]
     beginner_names = [
         item["name"]
         for item in config["parameters"]
@@ -84,12 +86,12 @@ def test_bilayers_config_is_structurally_valid():
     )
     assert beginner_names[-4:] == [
         "remove_border_cells",
-        "include_original_channels",
+        "include_original_data",
+        "existing_labels",
         "measurements_database",
-        "write_ome_zarr_labels",
     ]
-    assert parameters["include_original_channels"]["mode"] == "beginner"
-    assert parameters["include_original_channels"]["section_id"] == "essential"
+    assert parameters["include_original_data"]["mode"] == "beginner"
+    assert parameters["include_original_data"]["section_id"] == "essential"
     assert parameters["benchmark"]["mode"] == "advanced"
     assert parameters["measurements_database"]["default"] == "duckdb"
     assert parameters["measurements_database"]["mode"] == "beginner"
@@ -112,6 +114,8 @@ def test_bilayers_config_is_structurally_valid():
         "foci_model_4",
         "foci_channel_4",
     ]
+    assert parameters["max_inference_workers"]["default"] == 0
+    assert parameters["max_measurement_workers"]["default"] == 0
     assert all(
         parameters[f"foci_model_{slot}"]["section_id"] == "advanced"
         and parameters[f"foci_model_{slot}"]["mode"] == "advanced"
@@ -206,13 +210,26 @@ def test_bilayers_serializes_cellpose_sam_v2_and_original_selectors():
     assert "--cell-model cellpose-sam:cpsam" in original
 
 
-def test_bilayers_serializes_native_label_output_option():
+def test_bilayers_serializes_output_and_existing_label_options():
     command = generate_cli_command(
-        load_config(), {"write_ome_zarr_labels": True}
+        load_config(),
+        {"include_original_data": False, "existing_labels": "append"},
     )
-    assert "--write-ome-zarr-labels True" in command
-    args = build_parser().parse_args(["--write-ome-zarr-labels", "true"])
-    assert args.write_ome_zarr_labels is True
+    assert "--include-original-data False" in command
+    assert "--existing-labels append" in command
+    args = build_parser().parse_args(
+        ["--include-original-data", "false", "--existing-labels", "remove"]
+    )
+    assert args.include_original_data is False
+    assert args.existing_labels == "remove"
+
+
+def test_wrapper_accepts_legacy_output_options_for_one_compatibility_period():
+    args = build_parser().parse_args(
+        ["--include-original-channels", "false", "--write-ome-zarr-labels", "false"]
+    )
+    assert args.include_original_channels is False
+    assert args.write_ome_zarr_labels is False
 
 
 def test_bilayers_serializes_measurements_database_option():

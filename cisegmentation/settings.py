@@ -37,6 +37,7 @@ FOCI_MODELS = (
 SKIP = "skip"
 EXPANSION_PREFIX = "expand:"
 MEASUREMENT_DATABASE_FORMATS = ("duckdb", "sqlite", "skip")
+EXISTING_LABEL_POLICIES = ("remove", "overwrite", "append")
 OUTPUT_NAME_POSTFIX = "__cisegmentation"
 
 
@@ -72,8 +73,10 @@ class SegmentationSettings:
     foci_channel_3: int = 1
     foci_model_4: str = SKIP
     foci_channel_4: int = 1
-    include_original_channels: bool = False
-    write_ome_zarr_labels: bool = True
+    include_original_data: bool = True
+    existing_labels: str = "overwrite"
+    max_inference_workers: int = 0
+    max_measurement_workers: int = 0
     measurements_database: str = "duckdb"
     remove_border_cells: bool = True
     labels_log_info: bool = False
@@ -144,6 +147,14 @@ class SegmentationSettings:
             raise ValueError(
                 "Create Measurements Database must be duckdb, sqlite, or skip"
             )
+        if self.existing_labels not in EXISTING_LABEL_POLICIES:
+            raise ValueError(
+                "Existing Labels must be remove, overwrite, or append"
+            )
+        if self.max_inference_workers < 0:
+            raise ValueError("Maximum inference workers must be zero or greater")
+        if self.max_measurement_workers < 0:
+            raise ValueError("Maximum measurement workers must be zero or greater")
 
 
 _LEGACY_FIELDS = {
@@ -159,6 +170,15 @@ _LEGACY_FIELDS = {
 def normalize_legacy_workflow_values(values: dict) -> dict:
     """Translate the former checkbox-based workflow into selector values."""
     normalized = dict(values)
+    if (
+        "include_original_channels" in normalized
+        and "include_original_data" not in normalized
+    ):
+        normalized["include_original_data"] = normalized[
+            "include_original_channels"
+        ]
+    normalized.pop("include_original_channels", None)
+    normalized.pop("write_ome_zarr_labels", None)
     if (
         "spotiflow_microsam_refinement" in normalized
         and "spotiflow_local_refinement" not in normalized

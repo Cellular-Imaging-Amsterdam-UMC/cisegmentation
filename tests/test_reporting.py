@@ -101,15 +101,15 @@ def test_workflow_report_lists_selected_steps_and_tuning():
     )
     assert "bounded local intensity instance masks" in refined_report
 
-    native_report = "\n".join(
-        workflow_report_lines(SegmentationSettings(write_ome_zarr_labels=True))
+    full_report = "\n".join(
+        workflow_report_lines(SegmentationSettings(include_original_data=True))
     )
-    assert "native OME-Zarr 0.4 labels" in native_report
+    assert "original image retained and moved" in full_report
 
-    channel_report = "\n".join(
-        workflow_report_lines(SegmentationSettings(write_ome_zarr_labels=False))
+    overlay_report = "\n".join(
+        workflow_report_lines(SegmentationSettings(include_original_data=False))
     )
-    assert "output: labels as image channels" in channel_report
+    assert "mergeable labels-only overlay" in overlay_report
 
 
 def test_effective_parameters_report_model_defaults_and_stardist_rescaling():

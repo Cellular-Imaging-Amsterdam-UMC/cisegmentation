@@ -3,10 +3,10 @@
 CI Segmentation can write one measurements database for every top-level input
 OME-Zarr. A regular image produces one database containing that image. An HCS
 plate produces one database containing every well and field in the plate.
-For HCS inputs, each field is measured immediately after its segmentation is
-written, using the source image and final labels already in memory. The workflow
-does not reread the output OME-Zarr or retain all plate fields before starting
-measurements.
+For HCS inputs, measurements begin after every configured model pass and native
+label finalization has succeeded. Spawned CPU workers read source pixels and
+the final generated or preserved label groups. They emit bounded per-field
+database shards, which one parent process merges into the final database.
 
 The beginner **Create Measurements Database** selector offers:
 
@@ -86,7 +86,7 @@ available.
 
 ### `label_sets`
 
-One row per output label channel, such as:
+One row per native OME-Zarr label group, such as:
 
 - `labels_cells`;
 - `labels_nuclei`;
@@ -99,10 +99,10 @@ Duplicate Step 3 selections remain separate label sets through
 `label_set_index`, even when their displayed names are equal.
 
 `locations_only` distinguishes Spotiflow point locations from true masks.
-`output_label_path` identifies the corresponding OME-Zarr label group or image
-channel. `output_label_kind` is `label-image` for a native OME-Zarr label
-group or `image-channel` for a label appended to the main image. The latter
-also has a one-based `output_channel_index`.
+`label_origin` is `generated` or `existing`. `output_label_path` identifies the
+corresponding native OME-Zarr label group and `output_label_kind` is always
+`label-image`; `output_channel_index` is retained as a nullable compatibility
+column and is always `NULL` for new outputs.
 
 ### `label_set_sources`
 

@@ -46,8 +46,7 @@ class LabelResult:
     target: str
     provenance: dict[str, Any] = field(default_factory=dict)
     channel_labels: list[str] | None = None
-    include_original_channels: bool = False
-    write_ome_zarr_labels: bool = False
+    label_origins: list[str] | None = None
 
 
 def _attrs(group) -> dict[str, Any]:
@@ -62,6 +61,7 @@ _PHASE_TIMING_KEYS = (
     "model_load_seconds",
     "inference_seconds",
     "zarr_write_seconds",
+    "measurement_seconds",
 )
 _DETAIL_TIMING_KEYS = (
     "spot_detection_seconds",
@@ -93,6 +93,23 @@ def _set_write_timing(group, write_started: float) -> None:
         metadata.get("timings"), time.perf_counter() - write_started
     )
     group.attrs["cisegmentation"] = metadata
+
+
+def set_measurement_timing(
+    output_path: str | Path, measurement_seconds: float
+) -> None:
+    """Persist database measurement time after the OME-Zarr output is complete."""
+    import zarr
+
+    root = zarr.open_group(str(output_path), mode="a")
+    metadata = dict(_attrs(root).get("cisegmentation", {}))
+    timings = dict(metadata.get("timings", {}))
+    timings["measurement_seconds"] = float(measurement_seconds)
+    metadata["timings"] = _finalize_timings(
+        timings, float(timings.get("zarr_write_seconds", 0.0))
+    )
+    root.attrs["cisegmentation"] = metadata
+    root.store.close()
 
 
 def new_output_store_uuid() -> str:
@@ -255,62 +272,6 @@ def _downsample_labels(data: np.ndarray) -> np.ndarray:
     return data[..., ::2, ::2]
 
 
-def _output_pixels(result: LabelResult) -> tuple[np.ndarray, int]:
-    """Return label-safe int32 output pixels and the original channel count."""
-    labels = np.asarray(result.labels)
-    label_max = int(labels.max(initial=0))
-    if label_max > np.iinfo(np.int32).max:
-        raise OverflowError(
-            f"Maximum label ID {label_max} exceeds QuPath-compatible int32 range"
-        )
-    if not result.include_original_channels:
-        return labels.astype(np.int32, copy=False), 0
-
-    original = np.asarray(result.source.data)
-    if not (
-        np.issubdtype(original.dtype, np.integer)
-        or np.issubdtype(original.dtype, np.floating)
-    ):
-        raise TypeError(
-            "Including original channels supports integer or floating-point "
-            f"source pixels; source dtype is {original.dtype}"
-        )
-    if original.size:
-        if np.issubdtype(original.dtype, np.floating) and not np.all(
-            np.isfinite(original)
-        ):
-            raise ValueError(
-                "Floating-point original channels contain NaN or infinity and "
-                "cannot be converted safely to int32"
-            )
-        range_values = (
-            np.rint(original)
-            if np.issubdtype(original.dtype, np.floating)
-            else original
-        )
-        minimum = float(range_values.min())
-        maximum = float(range_values.max())
-        limits = np.iinfo(np.int32)
-        if minimum < limits.min or maximum > limits.max:
-            raise OverflowError(
-                f"Original pixel range {minimum}..{maximum} does not fit int32"
-            )
-    if original.shape[0] != labels.shape[0] or original.shape[2:] != labels.shape[2:]:
-        raise ValueError("Original and label pixels must have matching T, Z, Y and X")
-    converted = (
-        np.rint(original).astype(np.int32)
-        if np.issubdtype(original.dtype, np.floating)
-        else original.astype(np.int32, copy=False)
-    )
-    return (
-        np.concatenate(
-            (converted, labels.astype(np.int32, copy=False)),
-            axis=1,
-        ),
-        original.shape[1],
-    )
-
-
 def _axis_metadata() -> list[dict[str, str]]:
     return [
         {"name": "t", "type": "time"},
@@ -331,20 +292,50 @@ def _scale_values(source: ImageData, xy_factor: int = 1) -> list[float]:
     ]
 
 
+def _source_axis_metadata(source: ImageData) -> list[dict[str, str]]:
+    kinds = {"t": "time", "c": "channel", "z": "space", "y": "space", "x": "space"}
+    return [
+        {
+            "name": axis,
+            "type": kinds[axis],
+            **(
+                {"unit": "micrometer"}
+                if axis in {"z", "y", "x"}
+                else {}
+            ),
+        }
+        for axis in source.axes
+    ]
+
+
+def _source_scale_values(source: ImageData, xy_factor: int = 1) -> list[float]:
+    values = {
+        "t": source.scales.get("t", 1.0),
+        "c": 1.0,
+        "z": source.scales.get("z", 1.0),
+        "y": source.scales.get("y", 1.0) * xy_factor,
+        "x": source.scales.get("x", 1.0) * xy_factor,
+    }
+    return [values[axis] for axis in source.axes]
+
+
+def _from_tczyx(data: np.ndarray, axes: tuple[str, ...]) -> np.ndarray:
+    source_axes = ("t", "c", "z", "y", "x")
+    result = np.asarray(data)
+    for index in reversed(range(len(source_axes))):
+        if source_axes[index] not in axes:
+            if result.shape[index] != 1:
+                raise ValueError(
+                    f"Cannot omit non-singleton {source_axes[index].upper()} "
+                    "axis from a native label image"
+                )
+            result = np.squeeze(result, axis=index)
+    remaining = [axis for axis in source_axes if axis in axes]
+    permutation = [remaining.index(axis) for axis in axes]
+    return np.transpose(result, permutation)
+
+
 _LABEL_COLORS = ("00FF00", "0000FF", "FF00FF", "FFFF00", "00FFFF", "FF8000", "FF0000")
-
-
-def _label_channel_color(label: str, index: int) -> str:
-    text = label.lower()
-    if "cytoplasm" in text:
-        return "FF00FF"
-    if "nucle" in text:
-        return "0000FF"
-    if "cell" in text:
-        return "00FF00"
-    if "spot" in text or "foci" in text:
-        return ("FFFF00", "00FFFF", "FF8000", "FF0000")[index % 4]
-    return _LABEL_COLORS[index % len(_LABEL_COLORS)]
 
 
 def _ome_color_int(color: str) -> int:
@@ -375,31 +366,6 @@ def _source_channel_metadata(result: LabelResult, count: int) -> list[dict[str, 
             }
         )
     return metadata
-
-
-def _output_channel_metadata(
-    result: LabelResult, pixels: np.ndarray, original_count: int
-) -> list[dict[str, Any]]:
-    channels = _source_channel_metadata(result, original_count)
-    label_names = result.channel_labels or [f"{result.target} labels"]
-    for label_index, channel_name in enumerate(label_names):
-        output_index = original_count + label_index
-        maximum = max(1, int(pixels[:, output_index].max(initial=0)))
-        channels.append(
-            {
-                "label": channel_name,
-                "color": _label_channel_color(channel_name, label_index),
-                "lookupTable": "glasbey_inverted.lut",
-                "active": True,
-                "window": {
-                    "start": 0.0,
-                    "end": float(maximum),
-                    "min": 0.0,
-                    "max": float(maximum),
-                },
-            }
-        )
-    return channels
 
 
 def _ome_xml(
@@ -440,76 +406,6 @@ def _ome_xml(
     )
 
 
-def _write_image_group(group, result: LabelResult, name: str) -> None:
-    pixels, original_count = _output_pixels(result)
-    levels = [pixels]
-    while min(levels[-1].shape[-2:]) >= 512 and len(levels) < 5:
-        levels.append(_downsample_labels(levels[-1]))
-    datasets = []
-    for index, level in enumerate(levels):
-        chunks = (1, 1, 1, min(512, level.shape[-2]), min(512, level.shape[-1]))
-        array = group.create_dataset(
-            str(index),
-            shape=level.shape,
-            data=level,
-            chunks=chunks,
-            overwrite=True,
-            dimension_separator="/",
-        )
-        array.attrs["_ARRAY_DIMENSIONS"] = ["t", "c", "z", "y", "x"]
-        datasets.append(
-            {
-                "path": str(index),
-                "coordinateTransformations": [
-                    {"type": "scale", "scale": _scale_values(result.source, 2**index)}
-                ],
-            }
-        )
-    group.attrs["multiscales"] = [
-        {"version": "0.4", "name": name, "axes": _axis_metadata(), "datasets": datasets}
-    ]
-    channels_metadata = _output_channel_metadata(result, pixels, original_count)
-    group.attrs["omero"] = {
-        "version": "0.4",
-        "name": name,
-        "channels": channels_metadata,
-        "rdefs": {"defaultT": 0, "defaultZ": 0, "model": "color"},
-    }
-    group.attrs["cisegmentation"] = {
-        "model": result.model_id,
-        "target": result.target,
-        "source": str(result.source.resource.store_path.name),
-        "storage_dtype": "int32",
-        "original_channel_count": original_count,
-        "original_source_dtype": result.source.source_dtype
-        if original_count
-        else None,
-        "original_channels_conversion": "round-to-nearest-int32"
-        if original_count
-        and np.issubdtype(np.dtype(result.source.source_dtype), np.floating)
-        else ("lossless-int32-cast" if original_count else None),
-        "label_rendering": {
-            "lookup_table": "glasbey_inverted.lut",
-            "rendering_only": True,
-            "pixel_values_transformed": False,
-        },
-        **result.provenance,
-    }
-    store_root = getattr(group.store, "path", None) or getattr(
-        group.store, "root", None
-    )
-    if store_root is None:
-        raise RuntimeError(
-            "OME-XML sidecar writing requires a local directory-backed Zarr store"
-        )
-    ome = Path(store_root) / group.path / "OME"
-    ome.mkdir(parents=True, exist_ok=True)
-    (ome / ".zgroup").write_text(json.dumps({"zarr_format": 2}), encoding="utf-8")
-    (ome / "METADATA.ome.xml").write_text(
-        _ome_xml(result, name, pixels, channels_metadata), encoding="utf-8"
-    )
-
-
 def _label_group_names(result: LabelResult) -> list[str]:
     """Return safe, unique group names without changing displayed label names."""
     labels = result.channel_labels or [f"labels_{result.target}"]
@@ -526,6 +422,172 @@ def _label_group_names(result: LabelResult) -> list[str]:
         used.add(candidate)
         names.append(candidate)
     return names
+
+
+def existing_label_names(resource: ImageResource) -> list[str]:
+    """Return validated native label group names for one source image."""
+    import zarr
+
+    root = zarr.open_group(str(resource.store_path), mode="r")
+    group = root[resource.image_path] if resource.image_path else root
+    if "labels" not in group:
+        root.store.close()
+        return []
+    labels_group = group["labels"]
+    declared = [str(name) for name in labels_group.attrs.get("labels", [])]
+    available = set(labels_group.group_keys())
+    missing = [name for name in declared if name not in available]
+    if missing:
+        root.store.close()
+        raise ValueError(
+            f"Declared OME-Zarr labels are missing for {resource.name}: "
+            + ", ".join(missing)
+        )
+    source_multiscale = (_attrs(group).get("multiscales") or [{}])[0]
+    source_dataset = str(
+        (source_multiscale.get("datasets") or [{"path": "0"}])[0]["path"]
+    )
+    source_shape = tuple(group[source_dataset].shape)
+    source_axes = _axis_names(source_multiscale, len(source_shape))
+    for name in declared:
+        label_group = labels_group[name]
+        label_multiscale = (_attrs(label_group).get("multiscales") or [{}])[0]
+        label_dataset = str(
+            (label_multiscale.get("datasets") or [{"path": "0"}])[0]["path"]
+        )
+        if label_dataset not in label_group:
+            root.store.close()
+            raise ValueError(
+                f"Label {name!r} has no declared level-0 array"
+            )
+        array = label_group[label_dataset]
+        if not np.issubdtype(array.dtype, np.integer):
+            root.store.close()
+            raise ValueError(f"Label {name!r} must use an integer data type")
+        label_shape = tuple(array.shape)
+        label_axes = _axis_names(label_multiscale, len(label_shape))
+        source_sizes = dict(zip(source_axes, source_shape))
+        incompatible = any(
+            axis not in source_sizes
+            or size not in (1, source_sizes[axis])
+            for axis, size in zip(label_axes, label_shape)
+        ) or any(
+            axis not in label_axes and size != 1 and axis != "c"
+            for axis, size in source_sizes.items()
+        )
+        if incompatible:
+            root.store.close()
+            raise ValueError(
+                f"Label {name!r} axes/shape {label_axes}/{label_shape} are "
+                f"incompatible with source {source_axes}/{source_shape}"
+            )
+    root.store.close()
+    return declared
+
+
+def read_native_label(
+    resource: ImageResource, group_name: str, *, store_path: str | Path | None = None
+) -> np.ndarray:
+    """Read one native label level as TCZYX."""
+    import zarr
+
+    root = zarr.open_group(str(store_path or resource.store_path), mode="r")
+    prefix = f"{resource.image_path}/" if resource.image_path else ""
+    group = root[f"{prefix}labels/{group_name}"]
+    multiscale = (_attrs(group).get("multiscales") or [{}])[0]
+    dataset = str((multiscale.get("datasets") or [{"path": "0"}])[0]["path"])
+    raw = np.asarray(group[dataset])
+    axes = _axis_names(multiscale, raw.ndim)
+    result = _to_tczyx(raw, axes)
+    root.store.close()
+    return np.asarray(result, dtype=np.uint32)
+
+
+def write_native_label_groups(
+    store_path: str | Path,
+    resource_path: str,
+    result: LabelResult,
+    generated_group_names: list[str],
+    final_group_names: list[str],
+) -> None:
+    """Write only generated native label groups into an existing hierarchy."""
+    import zarr
+
+    if len(generated_group_names) != result.labels.shape[1]:
+        raise ValueError("Generated label group names do not match label channels")
+    root = zarr.open_group(str(store_path), mode="a")
+    group = root[resource_path] if resource_path else root
+    labels_group = group.require_group("labels")
+    labels_group.attrs["labels"] = list(final_group_names)
+    display_names = result.channel_labels or generated_group_names
+    for label_index, (group_name, display_name) in enumerate(
+        zip(generated_group_names, display_names)
+    ):
+        if group_name in labels_group:
+            del labels_group[group_name]
+        label_group = labels_group.require_group(group_name)
+        label_levels = [
+            _from_tczyx(
+                np.asarray(result.labels[:, label_index : label_index + 1]),
+                result.source.axes,
+            )
+        ]
+        while min(label_levels[-1].shape[-2:]) >= 512 and len(label_levels) < 5:
+            label_levels.append(_downsample_labels(label_levels[-1]))
+        datasets = []
+        for level_index, level in enumerate(label_levels):
+            chunks = tuple(
+                min(512, size) if index >= level.ndim - 2 else 1
+                for index, size in enumerate(level.shape)
+            )
+            array = label_group.create_dataset(
+                str(level_index),
+                shape=level.shape,
+                data=level,
+                chunks=chunks,
+                overwrite=True,
+                dimension_separator="/",
+            )
+            array.attrs["_ARRAY_DIMENSIONS"] = list(result.source.axes)
+            datasets.append(
+                {
+                    "path": str(level_index),
+                    "coordinateTransformations": [
+                        {
+                            "type": "scale",
+                            "scale": _source_scale_values(
+                                result.source, 2**level_index
+                            ),
+                        }
+                    ],
+                }
+            )
+        label_group.attrs["multiscales"] = [
+            {
+                "version": "0.4",
+                "name": str(display_name),
+                "axes": _source_axis_metadata(result.source),
+                "datasets": datasets,
+            }
+        ]
+        label_group.attrs["image-label"] = {
+            "version": "0.4",
+            "source": {"image": "../../"},
+        }
+    metadata = dict(_attrs(group).get("cisegmentation", {}))
+    metadata.update(
+        {
+            "model": result.model_id,
+            "target": result.target,
+            "source": result.source.resource.store_path.name,
+            "label_storage_dtype": str(np.asarray(result.labels).dtype),
+            "output_layout": "ome-zarr-0.4-labels",
+            "label_groups": [f"labels/{name}" for name in final_group_names],
+            **result.provenance,
+        }
+    )
+    group.attrs["cisegmentation"] = metadata
+    root.store.close()
 
 
 def _write_native_ome_zarr_labels(group, result: LabelResult, name: str) -> None:
@@ -668,12 +730,9 @@ def write_label_image(
     if temporary.exists():
         shutil.rmtree(temporary)
     root = zarr.open_group(str(temporary), mode="w", zarr_version=2)
-    writer = (
-        _write_native_ome_zarr_labels
-        if result.write_ome_zarr_labels
-        else _write_image_group
+    _write_native_ome_zarr_labels(
+        root, result, output_path.name.removesuffix(".ome.zarr")
     )
-    writer(root, result, output_path.name.removesuffix(".ome.zarr"))
     _set_output_store_uuid(root, output_store_uuid or new_output_store_uuid())
     _set_write_timing(root, write_started)
     root.store.close()
@@ -863,6 +922,8 @@ class HCSPlateWriter:
         self._model_cache_hits = 0
         self._model_cache_misses = 0
         self._result_cache_hits = 0
+        self._segmentation_seconds = 0.0
+        self._segmentation_count = 0
         self._write_seconds = 0.0
         self._closed = False
 
@@ -879,13 +940,8 @@ class HCSPlateWriter:
             raise ValueError(f"HCS field was written more than once: {resource_path}")
         row, column, field = plate_path
         group = self.root.require_group(resource_path)
-        writer = (
-            _write_native_ome_zarr_labels
-            if result.write_ome_zarr_labels
-            else _write_image_group
-        )
         write_started = time.perf_counter()
-        writer(
+        _write_native_ome_zarr_labels(
             group,
             result,
             f"{self.output_path.stem}_{row}_{column}_{field}",
@@ -903,6 +959,12 @@ class HCSPlateWriter:
             result.provenance.get("model_cache_misses", 0)
         )
         self._result_cache_hits += int(result.provenance.get("result_cache_hits", 0))
+        self._segmentation_seconds += float(
+            result.provenance.get("runtime_seconds", 0.0)
+        )
+        self._segmentation_count += int(
+            result.provenance.get("segmentation_count", 0)
+        )
 
     def finalize(self) -> Path:
         if self._closed:
@@ -944,6 +1006,8 @@ class HCSPlateWriter:
             "model_cache_hits": self._model_cache_hits,
             "model_cache_misses": self._model_cache_misses,
             "result_cache_hits": self._result_cache_hits,
+            "runtime_seconds": self._segmentation_seconds,
+            "segmentation_count": self._segmentation_count,
             "timings": _finalize_timings(aggregated, self._write_seconds),
         }
         self.root.store.close()

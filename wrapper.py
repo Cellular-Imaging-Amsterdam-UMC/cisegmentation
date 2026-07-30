@@ -4,21 +4,26 @@ import argparse
 import json
 import sys
 import time
+import warnings
 
 PROCESS_STARTED = time.perf_counter()
 
-from cisegmentation.engine import run_workflow
-from cisegmentation.settings import SegmentationSettings, normalize_legacy_workflow_values
+from cisegmentation.engine import run_workflow  # noqa: E402
+from cisegmentation.settings import (  # noqa: E402
+    SegmentationSettings,
+    normalize_legacy_workflow_values,
+)
 
 
 _TIMING_LABELS = (
     ("startup_seconds", "startup"),
-    ("zarr_read_seconds", "read"),
+    ("zarr_read_seconds", "ome-zarr-read"),
     ("import_seconds", "imports"),
     ("device_setup_seconds", "device"),
     ("model_load_seconds", "model-load"),
     ("inference_seconds", "inference"),
-    ("zarr_write_seconds", "write"),
+    ("zarr_write_seconds", "ome-zarr-write"),
+    ("measurement_seconds", "measurements"),
     ("total_seconds", "total"),
 )
 
@@ -37,6 +42,15 @@ def output_timing_line(output) -> str | None:
         f"{label}={float(timings.get(key, 0.0)):.2f}s"
         for key, label in _TIMING_LABELS
     )
+    segmentation_seconds = float(metadata.get("runtime_seconds", 0.0))
+    segmentation_count = int(metadata.get("segmentation_count", 0))
+    segmentation = (
+        f"segmentations-total={segmentation_seconds:.2f}s"
+        f" | segmentation-count={segmentation_count}"
+        f" | per-segmentation={segmentation_seconds / segmentation_count:.2f}s"
+        if segmentation_count
+        else "segmentations-total=0.00s | segmentation-count=0"
+    )
     hits = metadata.get("model_cache_hits")
     misses = metadata.get("model_cache_misses")
     result_reuses = metadata.get("result_cache_hits")
@@ -50,7 +64,7 @@ def output_timing_line(output) -> str | None:
         if result_reuses is not None
         else ""
     )
-    return f"Timing: {output.name} | {phases}{cache}{reuse}"
+    return f"Timing: {output.name} | {segmentation} | {phases}{cache}{reuse}"
 
 
 def _bool(value: str | bool) -> bool:
@@ -96,6 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
         "cell_expansion_nucleus_model": str,
         "nucleus_step": _bool,
         "spotiflow_microsam_refinement": _bool,
+        "include_original_channels": _bool,
+        "write_ome_zarr_labels": _bool,
         **{f"foci_step_{slot}": _bool for slot in range(1, 5)},
     }
     for name, kind in legacy_types.items():
@@ -128,10 +144,24 @@ def main(argv: list[str] | None = None) -> int:
         "cell_expansion_nucleus_model",
         "nucleus_step",
         "spotiflow_microsam_refinement",
+        "include_original_channels",
+        "write_ome_zarr_labels",
         *(f"foci_step_{slot}" for slot in range(1, 5)),
     ):
         if hasattr(args, name):
             values[name] = getattr(args, name)
+    if "include_original_channels" in values:
+        warnings.warn(
+            "--include-original-channels is deprecated; use "
+            "--include-original-data",
+            DeprecationWarning,
+        )
+    if "write_ome_zarr_labels" in values:
+        warnings.warn(
+            "--write-ome-zarr-labels is deprecated and ignored; native "
+            "OME-Zarr labels are always written",
+            DeprecationWarning,
+        )
     settings = SegmentationSettings(**normalize_legacy_workflow_values(values))
     print(f"CI segmentation: optional steps, benchmark={settings.benchmark}", flush=True)
     try:

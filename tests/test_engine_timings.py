@@ -41,6 +41,7 @@ def test_multitimepoint_cache_and_timings_are_aggregated(inputfolder, monkeypatc
     assert result.provenance["model_cache_misses"] == 1
     assert result.provenance["model_cache_hits"] == 1
     assert result.provenance["runtime_seconds"] == 2.0
+    assert result.provenance["segmentation_count"] == 2
     assert result.provenance["timings"] == {
         "device_setup_seconds": 0.2,
         "import_seconds": 0.5,

@@ -98,7 +98,18 @@ parameters:
   mode: beginner
 - {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
 - {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: include_original_channels, type: checkbox, label: Include Original Data Channels, description: Prepend all original channels to the int32 output. Integer data is copied losslessly; finite in-range floating-point data is rounded to the nearest integer. Label values remain unchanged., default: true, cli_tag: --include-original-channels, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
+- {name: include_original_data, type: checkbox, label: Include Original Data, description: Add native labels to the original OME-Zarr and move the completed store to the output folder. Disable to keep the input and write a mergeable labels-only overlay., default: true, cli_tag: --include-original-data, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
+- name: existing_labels
+  type: dropdown
+  label: Existing Labels
+  description: Remove all existing labels, overwrite generated label names while preserving unrelated labels, or append generated labels using numbered names on collisions.
+  options: [{label: Remove Existing Labels, value: remove}, {label: Overwrite Existing Labels, value: overwrite}, {label: Append to Labels, value: append}]
+  default: overwrite
+  cli_tag: --existing-labels
+  cli_order: 45
+  optional: true
+  section_id: essential
+  mode: beginner
 - name: measurements_database
   type: string
   label: Create Measurements Database
@@ -114,7 +125,6 @@ parameters:
   optional: true
   section_id: essential
   mode: beginner
-- {name: write_ome_zarr_labels, type: checkbox, label: Write Native OME-Zarr Labels, description: Write the original image at the output root and each segmentation as an OME-Zarr 0.4 image-label under the labels group instead of appending label channels., default: true, cli_tag: --write-ome-zarr-labels, cli_order: 45, optional: true, append_value: true, section_id: essential, mode: beginner}
 - {name: foci_model_2, type: dropdown, label: "Step 3b: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_model_3, type: dropdown, label: "Step 3c: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: advanced, mode: advanced}
@@ -134,6 +144,8 @@ parameters:
   section_id: advanced
   mode: advanced
 - {name: labels_log_info, type: checkbox, label: Labels Log Info, description: Calculate and log label counts, foreground fraction, and label size statistics. Disabled by default to avoid scanning large label arrays after segmentation., default: false, cli_tag: --labels-log-info, cli_order: 46, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: max_inference_workers, type: integer, label: Maximum Inference Workers, description: Upper limit for conservatively GPU-memory-sized inference processes. Automatic sizing includes NVIDIA process memory and keeps a larger VRAM reserve and worker safety margin. Use 0 for automatic., default: 0, minimum: 0, cli_tag: --max-inference-workers, cli_order: 47, optional: true, section_id: advanced, mode: advanced}
+- {name: max_measurement_workers, type: integer, label: Maximum Measurement Workers, description: Upper limit for CPU measurement processes. Use 0 for the available Slurm or physical CPU allocation., default: 0, minimum: 0, cli_tag: --max-measurement-workers, cli_order: 48, optional: true, section_id: advanced, mode: advanced}
 - name: dimension_mode
   type: dropdown
   label: Dimension Mode

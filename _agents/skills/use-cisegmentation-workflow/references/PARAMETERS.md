@@ -45,14 +45,16 @@ Step 3 choices are `spotiflow:general`, `spotiflow:hybiss`,
 | Name | Type | Required | Default | Constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `remove_border_cells` | boolean | no | `true` | — | Remove cells touching an XY border and their matched nuclei/cytoplasm. |
-| `include_original_channels` | boolean | no | `true` | Relevant only when native label groups are disabled | Prepend original channels to the combined `int32` output. |
-| `write_ome_zarr_labels` | boolean | no | `true` | — | Write original pixels at the root and each segmentation under OME-Zarr 0.4 `labels/`. |
+| `include_original_data` | boolean | no | `true` | — | Add native labels to the source store and move it to the output; when false, keep the source and write a sparse mergeable labels-only overlay. |
+| `existing_labels` | choice | no | `overwrite` | `remove`, `overwrite`, `append` | Replace the complete labels tree, overwrite generated-name collisions while preserving unrelated labels, or append collision-safe names. |
 | `measurements_database` | choice | no | `duckdb` | `duckdb`, `sqlite`, `skip` | Create object, intensity, and relationship measurements. |
 | `labels_log_info` | boolean | no | `false` | Advanced | Calculate extra label statistics; increases full-array scanning. |
 | `benchmark` | boolean | no | `false` | Advanced; changes the output contract | Benchmark eligible models on the first image/field, first timepoint, and a centered XY region up to 1024×1024. |
 
-When `write_ome_zarr_labels=true`, `include_original_channels` does not change
-the native-label layout. Benchmark mode emits only a comparison gallery and no
+Generated segmentations are always native OME-Zarr label groups. The legacy
+`include_original_channels` argument maps to `include_original_data`, and the
+legacy `write_ome_zarr_labels` argument is accepted but ignored for one
+compatibility period. Benchmark mode emits only a comparison gallery and no
 measurements database.
 
 ## Runtime and model tuning
@@ -60,6 +62,8 @@ measurements database.
 | Name | Type | Required | Default | Constraints | Meaning and resource effect |
 | --- | --- | --- | --- | --- | --- |
 | `device` | choice | no | `auto` | `auto`, `cuda`, `cpu` | `cuda` requires an available compatible GPU; `cpu` is usually slower. |
+| `max_inference_workers` | integer | no | `0` | `>=0` | Cap model workers; zero uses conservative automatic sizing from PyTorch and NVIDIA process memory, reserving at least 2 GiB or 20% of VRAM with a 50% worker margin. |
+| `max_measurement_workers` | integer | no | `0` | `>=0` | Cap spawned CPU measurement workers; zero uses the available allocation while reserving one coordinator. |
 | `dimension_mode` | choice | no | `auto` | `auto`, `slice-2d` | Native 3D where supported or independent slice-wise 2D; 3D generally uses more memory. |
 | `diameter` | number, µm | no | `0.0` | `>=-1` | Cellpose expected diameter. `0` uses workflow defaults; `-1` uses the model default. |
 | `cellprob_threshold` | number | no | `0.0` | finite | Cellpose object probability threshold. |
@@ -83,5 +87,5 @@ measurements database.
 - Reject `device=cuda` when the consumer reports no compatible GPU resource.
 - Keep the defaults for model thresholds unless the user has a reason to tune
   them. A conservative normal-run example is Step 1 `cellpose3:cyto3` on
-  channel `1`, all other detection steps skipped, `device=auto`, native labels
-  enabled, and DuckDB measurements enabled.
+  channel `1`, all other detection steps skipped, `device=auto`,
+  `existing_labels=overwrite`, and DuckDB measurements enabled.

@@ -13,6 +13,8 @@ def test_output_timing_line_reads_root_provenance(tmp_path):
             {
                 "cisegmentation": {
                     "timings": timings,
+                    "runtime_seconds": 2.0,
+                    "segmentation_count": 4,
                     "model_cache_hits": 3,
                     "model_cache_misses": 1,
                     "result_cache_hits": 2,
@@ -26,7 +28,13 @@ def test_output_timing_line_reads_root_provenance(tmp_path):
     assert line is not None
     assert "startup=0.00s" in line
     assert "inference=0.50s" in line
-    assert "total=0.70s" in line
+    assert "segmentations-total=2.00s" in line
+    assert "segmentation-count=4" in line
+    assert "per-segmentation=0.50s" in line
+    assert "ome-zarr-read=0.10s" in line
+    assert "ome-zarr-write=0.60s" in line
+    assert "measurements=0.70s" in line
+    assert "total=0.80s" in line
     assert "cache-hits=3 | cache-misses=1" in line
     assert "result-reuses=2" in line
 

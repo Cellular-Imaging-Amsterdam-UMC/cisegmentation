@@ -15,10 +15,10 @@ CI Segmentation can write one measurements database for every top-level input
 OME-Zarr. A regular image produces one database containing that image. An HCS
 plate produces one database containing every well and field in the plate.
 
-For HCS inputs, each field is measured immediately after its segmentation is
-written, using the source image and final labels already in memory. The workflow
-does not reread the output OME-Zarr or retain all plate fields before starting
-measurements.
+For HCS inputs, measurements begin after all configured model passes and native
+label finalization succeed. Spawned CPU workers read source pixels and final
+generated or preserved label groups, then a single parent writer merges bounded
+field shards into the final database.
 
 The **Create Measurements Database** selector offers:
 
@@ -71,7 +71,7 @@ pixel coordinate × axis scale
 Bounding-box minima are inclusive and maxima are exclusive, matching NumPy
 slicing.
 
-Schema v4 additionally calculates bounded image-QC metrics directly from
+Schema v5 includes label origin and calculates bounded image-QC metrics directly from
 level-0 pixels already in memory. Expensive calculations use a deterministic
 regular grid capped at 1,048,576 samples per plane. Scores compare fields
 within the same run, channel index, timepoint, and Z plane. They identify
@@ -112,7 +112,7 @@ available.
 
 ### `label_sets`
 
-One row per output label channel, such as:
+One row per native OME-Zarr label group, such as:
 
 - `labels_cells`;
 - `labels_nuclei`;
@@ -125,9 +125,9 @@ Duplicate Step 3 selections remain separate label sets through
 `label_set_index`, even when their displayed names are equal.
 
 `locations_only` distinguishes Spotiflow point locations from true masks.
-`output_label_path` identifies the corresponding OME-Zarr label group or image
-channel. `output_label_kind` is either `label-image` or `image-channel`;
-appended label channels also record their one-based `output_channel_index`.
+`label_origin` is `generated` or `existing`. `output_label_path` identifies the
+native OME-Zarr label group, `output_label_kind` is `label-image`, and the
+compatibility column `output_channel_index` is `NULL` for new outputs.
 
 ### `label_set_sources`
 
