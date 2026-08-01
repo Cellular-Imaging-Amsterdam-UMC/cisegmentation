@@ -9,8 +9,8 @@ and Spotiflow with optional local mask refinement from one CUDA 12.6 environment
 
 - Input: one or more top-level `.ome.zarr` stores in `/data/in`, including HCS plates.
 - Normal output: `<source>__cisegmentation.ome.zarr` in `/data/out`, containing
-  native OME-Zarr label groups. By default the source store is moved with its
-  original pixels; disabling **Include Original Data** writes a sparse,
+  native OME-Zarr label groups. By default the source store is copied with its
+  original pixels and remains untouched; disabling **Include Original Data** writes a sparse,
   mergeable labels-only overlay and leaves the source untouched.
 - Benchmark output: **only** `benchmark_gallery_<image>.ome.zarr`.
 - Axes are normalized to `TCZYX`; time and Z are preserved in normal runs.
@@ -62,8 +62,10 @@ sized from a model memory probe and the available GPU or CPU allocation. Native
 labels are finalized in a CPU pool after inference, then measurements run in
 spawned CPU workers and stream bounded field databases to one parent writer.
 The run-specific temporary working directory is a hidden sibling in the output
-folder, never a child of the input OME-Zarr. The final store and database become
-visible only after every phase succeeds.
+folder, never a child of the input OME-Zarr. For full-data output, a verified
+source copy runs alongside label finalization and generated labels are committed
+only to that copy. The final store and database become visible only after every
+phase succeeds.
 
 For a direct local run:
 
@@ -101,7 +103,7 @@ converted internally using the OME-Zarr XY scale metadata.
 | Step 1 Expansion Distance | Sets the maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
 | Step 2: Nuclei Detection (`--nucleus-model`) / Channel | Selects `Skip` or an independent nucleus model. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained, cells without nuclei are removed, and cytoplasm is written with shared IDs. Step 2 may repeat the nucleus model used for Step 1 expansion. |
 | Step 3a–3d: Foci Detection (`--foci-model-1` … `--foci-model-4`) / Channel | Step 3a is a beginner selector; Steps 3b–3d appear first in the advanced options. Each offers `Skip`, Spotiflow, `SD_Foci_*` StarDist, and Cellpose 3 `bact` models. Repeating models or channels is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
-| Include Original Data (`--include-original-data`) | Beginner option, enabled by default. Add native labels to the input store and move it to `<source>__cisegmentation.ome.zarr` after all phases succeed. Disable it to keep the input and publish a sparse, mergeable labels-only overlay. The legacy `--include-original-channels` argument maps to this option for one compatibility period. |
+| Include Original Data (`--include-original-data`) | Beginner option, enabled by default. Copy the source pixels to `<source>__cisegmentation.ome.zarr`, add native labels only to that copy, and retain the unchanged input. Disable it to publish a sparse, mergeable labels-only overlay. The legacy `--include-original-channels` argument maps to this option for one compatibility period. |
 | Existing Labels (`--existing-labels`) | `overwrite` (default) replaces generated-name collisions while preserving unrelated labels; `remove` replaces the complete labels tree; `append` preserves all groups and assigns collision-safe suffixes consistently across the plate. |
 | Maximum Inference / Measurement Workers | Advanced caps for automatically sized inference and measurement pools. Zero means automatic based on GPU memory, CPU allocation/affinity, and RAM. GPU sizing uses the greater of PyTorch peak allocation and NVIDIA's complete worker-process memory, reserves at least 2 GiB or 20% of VRAM, and applies a 50% per-worker safety margin. |
 | Labels Log Info (`--labels-log-info`) | Advanced option, disabled by default. Calculate and log per-step and final label counts, foreground fraction, and label size statistics. Leave disabled for faster processing of large fields. |

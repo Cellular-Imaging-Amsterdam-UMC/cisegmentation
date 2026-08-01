@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+from threading import Event
 import time
 import traceback
 from typing import Any, Callable
@@ -1344,6 +1345,95 @@ def _tree_manifest(root: Path) -> dict[str, int]:
     }
 
 
+def copy_source_store(
+    source: Path,
+    destination: Path,
+    *,
+    log: Callable[[str], None] | None = None,
+    cancel_event: Event | None = None,
+) -> dict[str, float | int]:
+    """Copy and verify a source store without modifying it.
+
+    The destination is expected to be a run-specific path on the output
+    filesystem. Progress is byte-based because OME-Zarr chunk sizes can vary
+    substantially between stores.
+    """
+    started = time.perf_counter()
+    if log:
+        log("Source data copy: scanning input store")
+    file_count = 0
+    total_bytes = 0
+    for path in source.rglob("*"):
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Source data copy cancelled")
+        if path.is_file():
+            file_count += 1
+            total_bytes += path.stat().st_size
+
+    copied_bytes = 0
+    copied_files = 0
+    last_emit = time.perf_counter()
+    last_percent = 0.0
+
+    def report(*, force: bool = False) -> None:
+        nonlocal last_emit, last_percent
+        if not log:
+            return
+        now = time.perf_counter()
+        elapsed = max(0.0, now - started)
+        percent = (
+            100.0 * copied_bytes / total_bytes if total_bytes else 100.0
+        )
+        if not (
+            force
+            or percent - last_percent >= PROGRESS_PERCENT_STEP
+            or now - last_emit >= PROGRESS_HEARTBEAT_SECONDS
+        ):
+            return
+        copied_mib = copied_bytes / (1024.0**2)
+        total_mib = total_bytes / (1024.0**2)
+        rate = copied_mib / elapsed if elapsed > 0 else 0.0
+        remaining_mib = max(0.0, total_mib - copied_mib)
+        eta = remaining_mib / rate if rate > 0 else None
+        eta_text = _duration_text(eta) if eta is not None else "calculating"
+        log(
+            f"Source data copy: {copied_mib:.1f}/{total_mib:.1f} MiB "
+            f"({percent:.1f}%) | files={copied_files}/{file_count} "
+            f"| elapsed={_duration_text(elapsed)} | rate={rate:.1f} MiB/s "
+            f"| ETA={eta_text}"
+        )
+        last_emit = now
+        last_percent = percent
+
+    def copy_file(origin: str, target: str) -> str:
+        nonlocal copied_bytes, copied_files
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError("Source data copy cancelled")
+        result = shutil.copy2(origin, target)
+        copied_bytes += Path(origin).stat().st_size
+        copied_files += 1
+        report()
+        return result
+
+    if destination.exists():
+        shutil.rmtree(destination)
+    report(force=True)
+    try:
+        shutil.copytree(source, destination, copy_function=copy_file)
+        if _tree_manifest(source) != _tree_manifest(destination):
+            raise OSError("OME-Zarr source copy verification failed")
+        report(force=True)
+    except Exception:
+        if destination.exists():
+            shutil.rmtree(destination)
+        raise
+    return {
+        "files": file_count,
+        "bytes": total_bytes,
+        "runtime_seconds": time.perf_counter() - started,
+    }
+
+
 def _move_or_copy_tree(source: Path, destination: Path) -> str:
     """Move a tree atomically, with a verified cross-filesystem fallback."""
     try:
@@ -1536,39 +1626,6 @@ def _replace_destination(source: Path, destination: Path) -> None:
         raise
     if previous.exists():
         shutil.rmtree(previous)
-
-
-def publish_consumed_store(source: Path, destination: Path) -> str:
-    """Move a completed source store, copying safely across filesystems."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _replace_destination(source, destination)
-        return "rename"
-    except OSError as exc:
-        if getattr(exc, "errno", None) not in {18, 17}:
-            raise
-    partial = destination.with_name(destination.name + ".partial")
-    if partial.exists():
-        shutil.rmtree(partial)
-    try:
-        shutil.copytree(source, partial)
-        source_manifest = _tree_manifest(source)
-        copied_manifest = _tree_manifest(partial)
-        if source_manifest != copied_manifest:
-            raise OSError(
-                "Cross-filesystem OME-Zarr copy verification failed"
-            )
-        _replace_destination(partial, destination)
-        try:
-            shutil.rmtree(source)
-        except Exception:
-            recover_label_commit(source)
-            return "copy-source-retained"
-    except Exception:
-        if partial.exists():
-            shutil.rmtree(partial)
-        raise
-    return "copy"
 
 
 def publish_overlay(overlay_path: Path, destination: Path) -> None:

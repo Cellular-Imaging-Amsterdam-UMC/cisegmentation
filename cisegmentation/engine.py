@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 import math
 from pathlib import Path
 import shutil
+from threading import Event
 import time
 from dataclasses import replace
 from collections.abc import Callable
@@ -738,10 +740,9 @@ def _run_parallel_store(
     from .measurements import measurement_database_path
     from .parallel_pipeline import (
         commit_overlay_labels,
+        copy_source_store,
         expected_channel_labels,
-        finalize_label_commit,
         prepare_label_overlay,
-        publish_consumed_store,
         publish_overlay,
         recover_label_commit,
         resolve_label_policy,
@@ -757,6 +758,7 @@ def _run_parallel_store(
         f".{source_name}.cisegmentation-staging-{run_id}"
     )
     overlay_partial = stage_dir / "label-overlay.ome.zarr"
+    full_data_partial = stage_dir / "full-data.ome.zarr"
     shard_dir = stage_dir / "measurement-shards"
     output_store_uuid = new_output_store_uuid()
     database_path = (
@@ -775,11 +777,31 @@ def _run_parallel_store(
     emit(log, f"Temporary working directory: {stage_dir}")
     measurement_summary = None
     finalization: dict[str, dict] = {}
+    copy_executor: ThreadPoolExecutor | None = None
+    copy_future = None
+    copy_summary: dict[str, float | int] | None = None
+    copy_cancel = Event()
     try:
         prepare_label_overlay(store, overlay_partial, resources)
         passes, records, inference_parallelism = run_inference_passes(
             resources, settings, stage_dir, log=log
         )
+        if settings.include_original_data:
+            emit(
+                log,
+                "Starting verified source-data copy in parallel with label "
+                "finalization",
+            )
+            copy_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="source-data-copy"
+            )
+            copy_future = copy_executor.submit(
+                copy_source_store,
+                store,
+                full_data_partial,
+                log=log,
+                cancel_event=copy_cancel,
+            )
         finalization, label_parallelism = run_label_finalization(
             resources,
             settings,
@@ -794,6 +816,18 @@ def _run_parallel_store(
         label_write_seconds = float(
             label_parallelism["zarr_write_seconds"]
         )
+        if copy_future is not None:
+            copy_summary = copy_future.result()
+            assert copy_executor is not None
+            copy_executor.shutdown(wait=True)
+            copy_executor = None
+            emit(
+                log,
+                "Verified source-data copy: "
+                f"files={copy_summary['files']}, "
+                f"size={copy_summary['bytes'] / (1024.0**3):.2f} GiB, "
+                f"runtime={copy_summary['runtime_seconds']:.2f}s",
+            )
         write_overlay_manifest(
             overlay_partial,
             store,
@@ -832,6 +866,8 @@ def _run_parallel_store(
             "label_finalization": label_parallelism,
             "measurements": measurement_parallelism,
         }
+        if copy_summary is not None:
+            parallelism["source_data_copy"] = copy_summary
         emit(
             log,
             "Parallel phases: "
@@ -846,7 +882,7 @@ def _run_parallel_store(
             log,
             "Publication: "
             + (
-                "full-data move"
+                "full-data copy (source retained)"
                 if settings.include_original_data
                 else "labels-only overlay"
             )
@@ -875,17 +911,17 @@ def _run_parallel_store(
             generated_names=generated_names,
         )
         if settings.include_original_data:
+            assert copy_summary is not None
             commit_overlay_labels(
-                store,
+                full_data_partial,
                 overlay_partial,
                 resources,
                 settings,
                 existing_by_resource,
                 generated_names,
-                retain_journal=True,
             )
             _write_parallel_metadata(
-                store,
+                full_data_partial,
                 resources,
                 settings,
                 finalization,
@@ -898,17 +934,23 @@ def _run_parallel_store(
             )
             if overlay_partial.exists():
                 shutil.rmtree(overlay_partial)
+            publish_overlay(full_data_partial, output_path)
             if stage_dir.exists():
                 shutil.rmtree(stage_dir)
-            method = publish_consumed_store(store, output_path)
-            finalize_label_commit(output_path)
-            emit(log, f"Published full-data output by {method}: {output_path}")
+            emit(
+                log,
+                f"Published copied full-data output; source retained: "
+                f"{output_path}",
+            )
         else:
             publish_overlay(overlay_partial, output_path)
             if stage_dir.exists():
                 shutil.rmtree(stage_dir)
             emit(log, f"Published labels-only overlay: {output_path}")
     except Exception:
+        copy_cancel.set()
+        if copy_executor is not None:
+            copy_executor.shutdown(wait=True, cancel_futures=True)
         if stage_dir.exists():
             shutil.rmtree(stage_dir)
         if overlay_partial.exists():
@@ -941,12 +983,29 @@ def run_workflow(
     startup_seconds: float = 0.0,
     log: Callable[[str], None] | None = None,
 ) -> list[Path]:
+    input_path = Path(input_dir)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     settings.validate_steps()
     for line in workflow_report_lines(settings):
         emit(log, line)
-    stores = discover_ome_zarrs(input_dir)
+    stores = discover_ome_zarrs(input_path)
+    if input_path.is_dir() and input_path.resolve() == output_dir.resolve():
+        generated_outputs = [
+            store
+            for store in stores
+            if store.name.removesuffix(".ome.zarr")
+            .removesuffix(".zarr")
+            .endswith(OUTPUT_NAME_POSTFIX)
+        ]
+        stores = [store for store in stores if store not in generated_outputs]
+        if generated_outputs:
+            emit(
+                log,
+                "Ignoring existing generated output(s) in the shared "
+                "input/output folder: "
+                + ", ".join(store.name for store in generated_outputs),
+            )
     if not stores:
         raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")
     outputs: list[Path] = []

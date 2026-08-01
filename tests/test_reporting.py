@@ -104,7 +104,7 @@ def test_workflow_report_lists_selected_steps_and_tuning():
     full_report = "\n".join(
         workflow_report_lines(SegmentationSettings(include_original_data=True))
     )
-    assert "original image retained and moved" in full_report
+    assert "original image copied; source retained unchanged" in full_report
 
     overlay_report = "\n".join(
         workflow_report_lines(SegmentationSettings(include_original_data=False))

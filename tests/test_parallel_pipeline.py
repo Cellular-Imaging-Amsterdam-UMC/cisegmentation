@@ -23,7 +23,7 @@ from cisegmentation.ome_zarr_io import (  # noqa: E402
 from cisegmentation.parallel_pipeline import (  # noqa: E402
     build_model_passes,
     calculate_gpu_workers,
-    publish_consumed_store,
+    copy_source_store,
     recover_label_commit,
     resolve_label_policy,
 )
@@ -261,13 +261,16 @@ def test_labels_only_output_is_sparse_and_source_is_byte_unchanged(
     }
 
 
+@pytest.mark.parametrize("include_original_data", [False, True])
 def test_staging_is_outside_source_when_input_and_output_folder_are_equal(
-    tmp_path, inputfolder, monkeypatch
+    tmp_path, inputfolder, monkeypatch, include_original_data
 ):
     working = tmp_path / "same-folder"
     working.mkdir()
     source = working / "sample.ome.zarr"
     shutil.copytree(inputfolder / "nuclei-small.ome.zarr", source)
+    previous_output = working / "sample__cisegmentation.ome.zarr"
+    shutil.copytree(inputfolder / "nuclei-small.ome.zarr", previous_output)
     monkeypatch.setenv("CISEGMENTATION_INLINE_WORKERS", "1")
     monkeypatch.setattr(parallel_pipeline, "segment_czyx", _fake_segment)
 
@@ -278,7 +281,7 @@ def test_staging_is_outside_source_when_input_and_output_folder_are_equal(
             cell_model="cellpose3:cyto3",
             nucleus_model="skip",
             remove_border_cells=False,
-            include_original_data=False,
+            include_original_data=include_original_data,
             measurements_database="skip",
             max_inference_workers=1,
             max_measurement_workers=1,
@@ -286,12 +289,16 @@ def test_staging_is_outside_source_when_input_and_output_folder_are_equal(
     )
 
     assert source.is_dir()
+    assert (working / "sample__cisegmentation.ome.zarr").is_dir()
     assert outputs == [working / "sample__cisegmentation.ome.zarr"]
+    assert not (
+        working / "sample__cisegmentation__cisegmentation.ome.zarr"
+    ).exists()
     assert not list(source.glob(".cisegmentation-staging-*"))
     assert not list(working.glob(".sample.cisegmentation-staging-*"))
 
 
-def test_full_data_output_consumes_source_and_keeps_pixels(
+def test_full_data_output_retains_unchanged_source_and_keeps_pixels(
     tmp_path, inputfolder, monkeypatch
 ):
     source, output = _run_small_store(
@@ -301,7 +308,10 @@ def test_full_data_output_consumes_source_and_keeps_pixels(
         include_original_data=True,
     )
 
-    assert not source.exists()
+    assert source.is_dir()
+    assert _file_hashes(source) == _file_hashes(
+        inputfolder / "nuclei-small.ome.zarr"
+    )
     assert (output / "0" / ".zarray").is_file()
     assert (output / "labels" / "labels_cells" / "0" / ".zarray").is_file()
     assert not (
@@ -326,7 +336,7 @@ def test_overlay_manifest_merge_matches_full_data_labels(
         monkeypatch,
         include_original_data=False,
     )
-    _consumed_source, full = _run_small_store(
+    _full_source, full = _run_small_store(
         tmp_path / "full-run",
         inputfolder / "nuclei-small.ome.zarr",
         monkeypatch,
@@ -382,7 +392,7 @@ def test_failed_full_data_publication_restores_source_byte_for_byte(
     monkeypatch.setattr(parallel_pipeline, "segment_czyx", _fake_segment)
     monkeypatch.setattr(
         parallel_pipeline,
-        "publish_consumed_store",
+        "publish_overlay",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             OSError("publication failed")
         ),
@@ -480,33 +490,18 @@ def test_cuda_oom_retry_halves_inference_pool(
     assert provenance["inference_passes"][0]["retries"] == 1
 
 
-def test_cross_filesystem_publication_copies_verifies_and_replaces_destination(
-    tmp_path, monkeypatch
-):
+def test_source_store_copy_is_verified_and_retains_source(tmp_path):
     source = tmp_path / "source.ome.zarr"
     destination = tmp_path / "result.ome.zarr"
     source.mkdir()
     (source / ".zgroup").write_text("new", encoding="utf-8")
-    destination.mkdir()
-    (destination / ".zgroup").write_text("old", encoding="utf-8")
-    original_replace = parallel_pipeline._replace_destination
-    attempts = 0
 
-    def force_cross_filesystem(origin, target):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise OSError(errno.EXDEV, "cross-device link")
-        return original_replace(origin, target)
+    summary = copy_source_store(source, destination)
 
-    monkeypatch.setattr(
-        parallel_pipeline, "_replace_destination", force_cross_filesystem
-    )
-
-    assert publish_consumed_store(source, destination) == "copy"
-    assert not source.exists()
+    assert source.is_dir()
     assert (destination / ".zgroup").read_text(encoding="utf-8") == "new"
-    assert not destination.with_name(destination.name + ".previous").exists()
+    assert summary["files"] == 1
+    assert summary["bytes"] == 3
 
 
 def test_cross_filesystem_label_install_uses_verified_copy(

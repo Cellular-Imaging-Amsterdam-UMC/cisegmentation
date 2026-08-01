@@ -354,7 +354,7 @@ def workflow_report_lines(settings) -> list[str]:
         f"  post-processing: remove border cells={settings.remove_border_cells}",
         "  output: native OME-Zarr 0.4 labels; "
         + (
-            "original image retained and moved"
+            "original image copied; source retained unchanged"
             if settings.include_original_data
             else "mergeable labels-only overlay"
         ),

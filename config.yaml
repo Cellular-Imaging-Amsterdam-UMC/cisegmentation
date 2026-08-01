@@ -98,7 +98,7 @@ parameters:
   mode: beginner
 - {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
 - {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: include_original_data, type: checkbox, label: Include Original Data, description: Add native labels to the original OME-Zarr and move the completed store to the output folder. Disable to keep the input and write a mergeable labels-only overlay., default: true, cli_tag: --include-original-data, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
+- {name: include_original_data, type: checkbox, label: Include Original Data, description: Copy the original OME-Zarr to the output and add native labels only to that copy. The input remains unchanged. Disable to write a mergeable labels-only overlay., default: true, cli_tag: --include-original-data, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: existing_labels
   type: dropdown
   label: Existing Labels
