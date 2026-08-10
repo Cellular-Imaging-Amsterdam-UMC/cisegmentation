@@ -1,0 +1,43 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "cisegmentation",
+  "version": "0.5.0",
+  "description": "Agent skills for the Bilayers CI Segmentation workflow and its measurement databases.",
+  "author": {
+    "name": "Cellular Imaging Amsterdam UMC",
+    "url": "https://github.com/Cellular-Imaging-Amsterdam-UMC"
+  },
+  "homepage": "https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation",
+  "repository": "https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation",
+  "license": "MIT",
+  "keywords": ["bioimaging", "segmentation", "ome-zarr", "duckdb", "sqlite"],
+  "extensions": {
+    "nl.bioimaging.biomero": {
+      "skills": {
+        "analyze-cisegmentation-measurements": {
+          "purpose": "attachment-analysis",
+          "consumers": ["omero-analysis"],
+          "auto_activate": true,
+          "match": {
+            "extensions": [".duckdb", ".sqlite", ".sqlite3"],
+            "filename_globs": [
+              "*__cisegmentation_measurements.duckdb",
+              "*__cisegmentation_measurements.sqlite",
+              "*__cisegmentation_measurements.sqlite3"
+            ],
+            "required_tables": ["schema_info", "measurement_runs"]
+          },
+          "required_resources": ["references/REFERENCE.md"],
+          "required_capabilities": ["zarr-render-v2", "zarr-gallery-v1"],
+          "preferred_capabilities": ["omero-data-query-v1"]
+        },
+        "use-cisegmentation-workflow": {
+          "purpose": "workflow-operation",
+          "consumers": ["omero-biomero"],
+          "auto_activate": false,
+          "required_resources": ["references/PARAMETERS.md"]
+        }
+      }
+    }
+  }
+}

@@ -2,21 +2,12 @@
 name: analyze-cisegmentation-measurements
 description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
 metadata:
-  version: "4"
-  biomero-purpose: "attachment-analysis"
-  biomero-consumers: "omero-analysis"
-  biomero-auto-activate: "true"
-  biomero-file-extensions: ".duckdb,.sqlite"
-  biomero-filename-globs: "*__cisegmentation_measurements.duckdb,*__cisegmentation_measurements.sqlite"
-  biomero-required-tables: "schema_info,measurement_runs"
-  biomero-required-resources: "references/REFERENCE.md"
-  biomero-required-capabilities: "sql-readonly,zarr-render-v2,zarr-gallery-v1"
+  version: "5"
 ---
 
 # Instructions
 
-Help the user inspect and analyze an attached CI Segmentation measurements
-database in OMERO Analysis Chat.
+Help the user inspect and analyze a CI Segmentation measurements database.
 
 ## Required reference
 
@@ -74,7 +65,7 @@ db_path = "screen__cisegmentation_measurements.duckdb"
 db = duckdb.connect(db_path, read_only=True)
 ```
 
-Open SQLite read-only:
+Open SQLite or SQLite3 read-only:
 
 ```python
 from pathlib import Path
@@ -95,6 +86,7 @@ from pathlib import Path
 database_files = sorted(
     list(Path.cwd().rglob("*.duckdb"))
     + list(Path.cwd().rglob("*.sqlite"))
+    + list(Path.cwd().rglob("*.sqlite3"))
 )
 database_files
 ```
@@ -106,9 +98,9 @@ database_files
 - Treat pixel coordinates and timepoints as zero-based.
 - Treat `channel_index` as one-based.
 - Treat bounding-box minima as inclusive and maxima as exclusive.
-- Use `object_navigation` for viewer/ROI coordinates when schema version 3 or
-  newer provides it. Never invent an OMERO Image or Plate ID from a portable
-  database.
+- Use `object_navigation` for viewer or ROI coordinates when schema version 3
+  or newer provides it. Never invent environment-specific image or plate IDs
+  from a portable database.
 - Treat `output_store_uuid` as the cross-check between a database and an
   active output OME-Zarr. Refuse navigation when both UUIDs exist and differ.
 - Do not substitute pixel units for unavailable physical units.
