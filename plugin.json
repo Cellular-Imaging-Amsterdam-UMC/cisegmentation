@@ -28,7 +28,6 @@
             "required_tables": ["schema_info", "measurement_runs"]
           },
           "required_resources": ["references/REFERENCE.md"],
-          "required_capabilities": ["zarr-render-v2", "zarr-gallery-v1"],
           "preferred_capabilities": ["omero-data-query-v1"]
         },
         "use-cisegmentation-workflow": {

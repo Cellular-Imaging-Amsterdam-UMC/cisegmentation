@@ -56,6 +56,7 @@ def test_measurement_matching_is_specific_and_remote_capable():
     assert measurement["match"]["extensions"] == [".duckdb", ".sqlite", ".sqlite3"]
     assert ".csv" not in measurement["match"]["extensions"]
     assert measurement["preferred_capabilities"] == ["omero-data-query-v1"]
+    assert "required_capabilities" not in measurement
 
 
 def test_workflow_skill_documents_every_descriptor_parameter():
