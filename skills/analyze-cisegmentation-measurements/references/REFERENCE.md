@@ -22,7 +22,7 @@ field shards into the final database.
 
 The **Create Measurements Database** selector offers:
 
-- `DuckDB` (default): best for large analytical queries and browser-local Analysis.
+- `DuckDB` (default): best for large analytical queries.
 - `SQLite`: maximum compatibility with Python's standard library and database
   tools.
 - `Skip`: do not calculate or write measurements.
@@ -107,7 +107,7 @@ and available T/Z/Y/X scales.
 ### `channels`
 
 One row per original input channel. `channel_index` is one-based, matching the
-launcher. Channel name and display color come from OME-Zarr OMERO metadata when
+launcher. Channel name and display color come from OME-Zarr display metadata when
 available.
 
 ### `label_sets`
@@ -359,8 +359,8 @@ FROM object_navigation
 WHERE object_id = ?
 ```
 
-The database has no environment-specific OMERO Image or Plate ID. Obtain it
-from the authenticated active OMERO context and compare the viewer store UUID
+The database has no environment-specific image or plate identifier. A client
+may associate one with the database, but it must compare the active store UUID
 with `output_store_uuid` before opening a field or rendering an ROI.
 
 ### Cell with most assigned foci, including render navigation

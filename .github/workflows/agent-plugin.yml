@@ -1,0 +1,59 @@
+name: Agent Plugin
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements_dev.txt
+      - run: python -m pytest tests/test_agent_plugin.py tests/test_config_and_wrapper.py
+      - run: ruff check tests/test_agent_plugin.py
+      - name: Validate manifest schema and reference links
+        run: |
+          python - <<'PY'
+          import json
+          from urllib.request import urlopen
+          import jsonschema
+          manifest = json.load(open("plugin.json", encoding="utf-8"))
+          with urlopen(manifest["$schema"]) as response:
+              schema = json.load(response)
+          jsonschema.validate(manifest, schema)
+          PY
+
+  cpu-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt -r requirements_dev.txt
+      - run: python -m pytest -m "not gpu and not omero"
+
+  docker-builds:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        dockerfile: [Dockerfile, Dockerfile.gradio, Dockerfile.jupyter]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build headless application layer
+        run: >-
+          docker build
+          --file Dockerfile
+          --build-arg RUNTIME_CACHE_IMAGE=python:3.11-slim-bookworm
+          --tag w_cisegmentation:latest
+          .
+      - name: Build ${{ matrix.dockerfile }}
+        if: matrix.dockerfile != 'Dockerfile'
+        run: docker build --file "${{ matrix.dockerfile }}" --tag "cisegmentation-ci:${{ strategy.job-index }}" .

@@ -14,8 +14,8 @@ sets include cells, nuclei, cytoplasm, spots, foci, and bacteria. Duplicate
 Step 3 selections receive collision-safe group names. Regular images remain
 images; HCS inputs retain their plate/well/field organization.
 
-When `measurements_database` is not `skip`, also expect exactly one FileAnnotation
-per top-level input:
+When `measurements_database` is not `skip`, also expect exactly one database
+file per top-level input:
 
 ```text
 <source>__cisegmentation_measurements.duckdb
@@ -44,13 +44,12 @@ produce a measurements database.
 
 Treat a run as successful only when:
 
-1. the authenticated workflow capability reports a successful final status for
-   the retained run ID;
-2. the expected final OME-Zarr object is discoverable in OMERO;
-3. the result is associated with the intended source object in the active
-   group and permission context;
+1. the workflow execution interface reports a successful final status for the
+   retained run ID;
+2. the expected final OME-Zarr store is discoverable in the output location;
+3. the result is associated with the intended source input;
 4. expected label sets or the benchmark gallery can be enumerated;
-5. the requested database FileAnnotation is present and has the expected
+5. the requested database file is present and has the expected
    extension, unless measurements were skipped.
 
 Report missing or partial outputs even if the scheduler job ended. Do not claim
