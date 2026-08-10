@@ -47,8 +47,13 @@ jobs:
         dockerfile: [Dockerfile, Dockerfile.gradio, Dockerfile.jupyter]
     steps:
       - uses: actions/checkout@v4
-      - name: Build local base for derived variants
-        if: matrix.dockerfile != 'Dockerfile'
-        run: docker build --file Dockerfile --tag w_cisegmentation:latest .
+      - name: Build headless application layer
+        run: >-
+          docker build
+          --file Dockerfile
+          --build-arg RUNTIME_CACHE_IMAGE=python:3.11-slim-bookworm
+          --tag w_cisegmentation:latest
+          .
       - name: Build ${{ matrix.dockerfile }}
+        if: matrix.dockerfile != 'Dockerfile'
         run: docker build --file "${{ matrix.dockerfile }}" --tag "cisegmentation-ci:${{ strategy.job-index }}" .
