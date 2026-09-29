@@ -1,3 +1,8 @@
+from types import SimpleNamespace
+
+import psutil
+import pytest
+
 from cisegmentation import resources
 
 
@@ -8,15 +13,23 @@ def test_quantile_operation_limit_is_recoverable_without_being_a_memory_oom():
     assert not resources.tile_size_error(RuntimeError("tensor shape does not match"))
 
 
-def test_slurm_memory_allocation_bounds_host_ram(monkeypatch):
+@pytest.mark.parametrize("host_gib", [8, 32])
+def test_slurm_memory_allocation_bounds_host_ram(monkeypatch, host_gib):
     monkeypatch.setenv("SLURM_CPUS_PER_TASK", "4")
     monkeypatch.setenv("SLURM_MEM_PER_NODE", "16384")
     monkeypatch.delenv("SLURM_MEM_PER_CPU", raising=False)
     monkeypatch.setattr(resources, "cgroup_directories", list)
     monkeypatch.setattr(resources, "_job_rss", lambda: resources.GIB)
+    monkeypatch.setattr(
+        psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(
+            total=host_gib * resources.GIB, available=host_gib * resources.GIB
+        ),
+    )
     result = resources.snapshot()
     assert result.cpus <= 4
-    assert result.ram_limit == 16 * resources.GIB
+    assert result.ram_limit == min(host_gib, 16) * resources.GIB
     assert result.ram_available <= 15 * resources.GIB
 
 
