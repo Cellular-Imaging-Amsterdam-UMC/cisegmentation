@@ -30,6 +30,7 @@ from .ome_zarr_io import (
 )
 from .registry import get_model_spec
 from .settings import SKIP, SegmentationSettings
+from .resources import allocated_cpus, memory_error, snapshot, tile_size_error
 
 
 GPU_MIN_RESERVE_MB = 2048.0
@@ -461,16 +462,31 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             import torch
 
             if torch.cuda.is_available():
+                from .resources import apply_gpu_limit
+
+                apply_gpu_limit(torch)
                 torch.cuda.reset_peak_memory_stats()
         except Exception:
             torch = None
         read_started = time.perf_counter()
-        image = read_image(resource)
+        from .streaming import infer_streamed, should_stream
+
+        streaming = bool(payload.get("force_streaming")) or should_stream(resource, SegmentationSettings(**model_pass.requests[0].settings))
+        image = read_image(resource, lazy=True) if streaming else read_image(resource)
         read_seconds = time.perf_counter() - read_started
         records: dict[str, list[dict[str, Any]]] = {}
         for request in model_pass.requests:
             request_settings = SegmentationSettings(**request.settings)
             spec = get_model_spec(request.model_id)
+            if streaming:
+                infos, tile_read_seconds = infer_streamed(
+                    image, spec, request_settings,
+                    _raw_path(stage_dir, model_pass, request, resource), segment_czyx,
+                    log=lambda message: print(message, flush=True),
+                )
+                read_seconds += tile_read_seconds
+                records[request.request_id] = infos
+                continue
             labels_per_time = []
             infos = []
             for time_index in range(image.data.shape[0]):
@@ -528,18 +544,35 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             "device": device,
         }
     except Exception as exc:
+        if (memory_error(exc) or tile_size_error(exc)) and not payload.get("force_streaming") and not locals().get("streaming", False):
+            image = labels = labels_per_time = None
+            exc.__traceback__ = None
+            from .streaming import _cleanup_memory
+
+            _cleanup_memory()
+            return _inference_task({**payload, "force_streaming": True})
         message = f"{type(exc).__name__}: {exc}"
         return {
             "ok": False,
             "resource_path": resource.image_path,
             "error": message,
             "traceback": traceback.format_exc(),
+            "memory_oom": memory_error(exc),
+            "operation_size_limit": tile_size_error(exc),
             "cuda_oom": "out of memory" in message.lower()
             and "cuda" in (message + traceback.format_exc()).lower(),
         }
 
 
 def _gpu_memory_mb() -> tuple[float, float] | None:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            current = snapshot()
+            return current.gpu_total / 1024**2, current.gpu_available / 1024**2
+    except ImportError:
+        pass
     try:
         process = subprocess.run(
             [
@@ -587,7 +620,7 @@ def calculate_gpu_workers(
 def available_cpu_workers(task_count: int, cap: int = 0) -> int:
     if task_count <= 0:
         return 0
-    candidates = []
+    candidates = [allocated_cpus()]
     for name in ("SLURM_CPUS_PER_TASK", "SLURM_CPUS_ON_NODE"):
         value = os.environ.get(name)
         if value and value.isdigit():
@@ -626,9 +659,7 @@ def calculate_cpu_workers(
     if workers <= 1 or peak_worker_mb <= 0:
         return workers
     try:
-        import psutil
-
-        available_mb = psutil.virtual_memory().available / 1024**2
+        available_mb = snapshot().ram_available / 1024**2
     except Exception:
         return workers
     memory_workers = max(
@@ -759,6 +790,9 @@ def run_inference_passes(
                 if memory is not None
                 else min(1, len(remaining))
             )
+            workers = min(workers, calculate_cpu_workers(
+                len(remaining), peak_worker_mb=float(probe["rss_mb"]), cap=settings.max_inference_workers
+            ))
         else:
             workers = calculate_cpu_workers(
                 len(remaining),
@@ -790,12 +824,12 @@ def run_inference_passes(
                 for result in batch
                 if not result.get("ok")
             }
-            cuda_oom = any(
-                result.get("cuda_oom")
+            resource_oom = any(
+                result.get("cuda_oom") or result.get("memory_oom")
                 for result in batch
                 if not result.get("ok")
             )
-            if cuda_oom:
+            if resource_oom:
                 successful_batch = sum(
                     bool(result.get("ok")) for result in batch
                 )
@@ -805,9 +839,13 @@ def run_inference_passes(
                 )
                 for resource in pending:
                     for request in model_pass.requests:
-                        _raw_path(
-                            stage_dir, model_pass, request, resource
-                        ).unlink(missing_ok=True)
+                        raw_path = _raw_path(stage_dir, model_pass, request, resource)
+                        if not raw_path.resolve().is_relative_to(stage_dir.resolve()):
+                            raise RuntimeError("Raw result cleanup outside staging directory")
+                        if raw_path.is_dir():
+                            shutil.rmtree(raw_path)
+                        else:
+                            raw_path.unlink(missing_ok=True)
                         records[resource.image_path].pop(
                             request.request_id, None
                         )
@@ -838,9 +876,9 @@ def run_inference_passes(
                     f"{model_pass.model_id}: {first.get('error')}\n"
                     f"{first.get('traceback', '')}"
                 )
-            if cuda_oom:
+            if resource_oom:
                 selected_workers = max(1, selected_workers // 2)
-            if not cuda_oom:
+            if not resource_oom:
                 pending = [
                     resource
                     for resource in pending
@@ -943,6 +981,11 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
     generated_names: list[str] = payload["generated_names"]
     final_names: list[str] = payload["final_names"]
     try:
+        if any(_raw_path(stage_dir, model_pass, request, resource).is_dir()
+               for model_pass in passes for request in model_pass.requests):
+            from .streaming import finalize_streamed
+
+            return finalize_streamed(payload)
         image = read_image(resource)
         request_by_kind: dict[str, list[tuple[ModelPass, InferenceRequest, InferenceConsumer]]] = {}
         for model_pass in passes:
@@ -1242,22 +1285,26 @@ def resolved_label_result(
     provenance: dict[str, Any],
 ) -> LabelResult:
     """Load the label view that will exist after applying an overlay."""
-    image = read_image(resource)
+    from .streaming import ChannelStack, should_stream
+
+    streaming = should_stream(resource, SegmentationSettings(**(provenance.get("parameters") or {})))
+    image = read_image(resource, lazy=True) if streaming else read_image(resource)
     generated = set(generated_names)
     arrays = []
     origins = []
     for name in final_names:
         if name in generated:
             arrays.append(
-                read_native_label(resource, name, store_path=overlay_path)
+                read_native_label(resource, name, store_path=overlay_path, lazy=True) if streaming
+                else read_native_label(resource, name, store_path=overlay_path)
             )
             origins.append("generated")
         else:
-            arrays.append(read_native_label(resource, name))
+            arrays.append(read_native_label(resource, name, lazy=True) if streaming else read_native_label(resource, name))
             origins.append("existing")
     if not arrays:
         raise ValueError(f"No resolved labels for {resource.name}")
-    labels = np.concatenate(arrays, axis=1)
+    labels = ChannelStack(arrays) if streaming else np.concatenate(arrays, axis=1)
     return LabelResult(
         labels,
         image,

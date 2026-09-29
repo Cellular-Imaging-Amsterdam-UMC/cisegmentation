@@ -1014,7 +1014,7 @@ def run_workflow(
     if settings.benchmark:
         first_resource = enumerate_resources(stores[0])[0]
         read_started = time.perf_counter()
-        image = read_image(first_resource)
+        image = read_image(first_resource, lazy=True)
         read_seconds = time.perf_counter() - read_started
         for line in input_report_lines(image, read_seconds):
             emit(log, line)

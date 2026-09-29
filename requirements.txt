@@ -3,6 +3,7 @@ torch==2.11.0+cu126
 torchvision==0.26.0+cu126
 cellpose==4.2.1.1
 cellpose3_legacy @ git+https://github.com/Cellular-Imaging-Amsterdam-UMC/cellpose3_legacy.git@5789ad61c99a9e2fc8ea0a404f92d6ea1a6a9cd1
+-r requirements_cellpose_transformer.txt
 cistardist-pytorch==0.4.1
 zenodo-get>=2.0,<3
 instanseg-torch==0.1.1

@@ -394,6 +394,26 @@ def _refine_spotiflow_points(
     }
 
 
+def _pad_cellpose_transformer_input(net) -> None:
+    """Adapt legacy Cellpose's 16-pixel padding to the encoder's 32-pixel grid."""
+    if getattr(net, "_cisegmentation_shape_padding", False):
+        return
+    forward = net.forward
+
+    def padded_forward(image):
+        from torch.nn import functional
+
+        height, width = image.shape[-2:]
+        padding_y, padding_x = -height % 32, -width % 32
+        if padding_y or padding_x:
+            image = functional.pad(image, (0, padding_x, 0, padding_y))
+        result = forward(image)
+        return (result[0][..., :height, :width], *result[1:])
+
+    net.forward = padded_forward
+    net._cisegmentation_shape_padding = True
+
+
 def _segment_cellpose(
     czyx: np.ndarray,
     spec: ModelSpec,
@@ -412,14 +432,29 @@ def _segment_cellpose(
             from cellpose import models
         return models
 
+    constructor_options = {}
+    if spec.family == "cellpose3":
+        if spec.checkpoint in {"transformer_cp3", "neurips_cellpose_transformer"}:
+            constructor_options["backbone"] = "transformer"
+        elif spec.checkpoint == "neurips_cellpose_default":
+            constructor_options["nchan"] = 3
+            # Legacy convert_image over-pads a two-channel image to six when
+            # nchan=3. Supply exactly three, retaining selected channel order
+            # and using zero for the otherwise unspecified third channel.
+            if image.shape[-1] < 3:
+                image = np.pad(
+                    image, [(0, 0)] * (image.ndim - 1) + [(0, 3 - image.shape[-1])]
+                )
     model, timing = _cached_model(
         spec.id,
         device,
         importer,
         lambda models: models.CellposeModel(
-            gpu=gpu, pretrained_model=spec.checkpoint
+            gpu=gpu, pretrained_model=spec.checkpoint, **constructor_options
         ),
     )
+    if constructor_options.get("backbone") == "transformer" and hasattr(model, "net"):
+        _pad_cellpose_transformer_input(model.net)
     inference_started = time.perf_counter()
     kwargs: dict[str, Any] = {
         "diameter": _cellpose_diameter_pixels(
@@ -453,6 +488,7 @@ def _segment_cellpose(
         else None,
         "cellprob_threshold": float(settings.cellprob_threshold),
         "flow_threshold": float(settings.flow_threshold),
+        "network_configuration": constructor_options,
     }
     native_3d = (
         image.shape[0] > 1
@@ -490,10 +526,11 @@ def _predict_stardist_tiled(
     nms: float | None,
     *,
     collect_polygons: bool = False,
+    bounded: bool = False,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     tile_size, halo = 1024, 64
     height, width = image.shape[-2:]
-    if height <= tile_size and width <= tile_size:
+    if bounded or (height <= tile_size and width <= tile_size):
         labels, details = model.predict_instances(
             image, prob_thresh=prob, nms_thresh=nms, normalize=True
         )
@@ -618,6 +655,8 @@ def _segment_stardist(
     settings: SegmentationSettings,
     device: str,
     scales: dict[str, float],
+    *,
+    bounded: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     channel = settings.selected_channels(czyx.shape[0])[0]
     model, timing = _cached_model(
@@ -656,9 +695,9 @@ def _segment_stardist(
             prob,
             nms,
             collect_polygons=(
-                settings.smooth_stardist_labels
-                and tuple(plane.shape) != original_shape
+                settings.smooth_stardist_labels and tuple(plane.shape) != original_shape
             ),
+            bounded=bounded,
         )
         labels, restoration = _restore_stardist_labels(
             labels,
@@ -729,6 +768,22 @@ def _segment_instanseg(
         lambda: __import__("instanseg", fromlist=["InstanSeg"]).InstanSeg,
         constructor,
     )
+    # InstanSeg rescales to its training pixel size before percentile
+    # normalization. Torch 2.11 quantile rejects a channel plane over 2**24
+    # elements. Check before allocating the enlarged image; the streamer
+    # handles this known operation limit by splitting the current tile.
+    native_pixel_size = float(
+        getattr(getattr(model, "instanseg", None), "pixel_size", pixel_size_um)
+    )
+    if np.isfinite(native_pixel_size) and native_pixel_size > 0:
+        ratio = pixel_size_um / native_pixel_size
+        normalized_shape = tuple(max(1, int(size * ratio)) for size in czyx.shape[-2:])
+        if np.prod(normalized_shape, dtype=np.int64) > 2**24:
+            raise RuntimeError(
+                "quantile() input tensor is too large: InstanSeg normalization "
+                f"would rescale {czyx.shape[-2:]} to {normalized_shape} at "
+                f"{native_pixel_size:g} um/pixel; use smaller tiles"
+            )
     inference_started = time.perf_counter()
     target_index = (
         1
@@ -769,11 +824,7 @@ def _segment_spotiflow(
     cache = Path(os.environ.get("SPOTIFLOW_CACHE_DIR", root / "spotiflow"))
     channel = settings.selected_channels(czyx.shape[0])[0]
     volume = czyx[channel]
-    native_3d = (
-        volume.shape[0] > 1
-        and spec.dimensions == "3d"
-        and settings.dimension_mode != "slice-2d"
-    )
+    native_3d = spec.dimensions == "3d" and settings.dimension_mode != "slice-2d"
     if native_3d and settings.spotiflow_local_refinement:
         raise ValueError(
             "Spotiflow Local Mask Refinement supports slice-wise 2D; select "
@@ -839,19 +890,26 @@ def _segment_spotiflow(
             "spot_detection_seconds": detection_seconds,
             "inference_seconds": detection_seconds,
         }
-    points_by_plane = [
-        np.asarray(
+
+    def predict_plane(plane):
+        # A 3D checkpoint still needs a Z axis in forced slice mode.
+        points = np.asarray(
             model.predict(
-                volume[z],
+                plane[None] if spec.dimensions == "3d" else plane,
                 prob_thresh=threshold,
                 min_distance=min_distance,
                 device=device,
                 verbose=False,
             )[0],
             dtype=np.float32,
-        ).reshape(-1, 2)
-        for z in range(volume.shape[0])
-    ]
+        )
+        return (
+            points.reshape(-1, 3)[:, 1:]
+            if spec.dimensions == "3d"
+            else points.reshape(-1, 2)
+        )
+
+    points_by_plane = [predict_plane(volume[z]) for z in range(volume.shape[0])]
     detection_seconds = time.perf_counter() - detection_started
     detected_points = sum(len(points) for points in points_by_plane)
     if not settings.spotiflow_local_refinement:
@@ -909,6 +967,8 @@ def segment_czyx(
     spec: ModelSpec,
     settings: SegmentationSettings,
     scales: dict[str, float],
+    *,
+    bounded: bool = False,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     if settings.target not in spec.targets:
         raise ValueError(
@@ -933,7 +993,9 @@ def segment_czyx(
     if spec.family in {"cellpose3", "cellpose-sam"}:
         labels, timing = _segment_cellpose(czyx, spec, settings, device, scales)
     elif spec.family == "stardist":
-        labels, timing = _segment_stardist(czyx, spec, settings, device, scales)
+        labels, timing = _segment_stardist(
+            czyx, spec, settings, device, scales, bounded=bounded
+        )
     elif spec.family == "instanseg":
         labels, timing = _segment_instanseg(
             czyx,

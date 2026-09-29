@@ -82,6 +82,7 @@ def docker_source_id(root: str | Path) -> str:
         root / "Dockerfile",
         root / "Dockerfile.models",
         root / "requirements.txt",
+        root / "requirements_cellpose_transformer.txt",
         root / "config.yaml",
         root / "wrapper.py",
         root / "bilayers_cli.py",

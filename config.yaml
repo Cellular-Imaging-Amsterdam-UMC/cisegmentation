@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.5.0
+  tag: v0.6.0
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -146,6 +146,12 @@ parameters:
 - {name: labels_log_info, type: checkbox, label: Labels Log Info, description: Calculate and log label counts, foreground fraction, and label size statistics. Disabled by default to avoid scanning large label arrays after segmentation., default: false, cli_tag: --labels-log-info, cli_order: 46, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - {name: max_inference_workers, type: integer, label: Maximum Inference Workers, description: Upper limit for conservatively GPU-memory-sized inference processes. Automatic sizing includes NVIDIA process memory and keeps a larger VRAM reserve and worker safety margin. Use 0 for automatic., default: 0, minimum: 0, cli_tag: --max-inference-workers, cli_order: 47, optional: true, section_id: advanced, mode: advanced}
 - {name: max_measurement_workers, type: integer, label: Maximum Measurement Workers, description: Upper limit for CPU measurement processes. Use 0 for the available Slurm or physical CPU allocation., default: 0, minimum: 0, cli_tag: --max-measurement-workers, cli_order: 48, optional: true, section_id: advanced, mode: advanced}
+- {name: streaming_mode, type: dropdown, label: Streaming, description: Automatically stream large images or force streaming for a smaller test image., options: [{label: Automatic, value: auto}, {label: Always, value: on}], default: auto, cli_tag: --streaming-mode, cli_order: 49, optional: true, section_id: advanced, mode: advanced}
+- {name: tile_size, type: integer, label: Maximum Tile Size, description: Maximum XY core size. Available job memory and memory retries may reduce this while running., default: 1024, minimum: 64, cli_tag: --tile-size, cli_order: 50, optional: true, section_id: advanced, mode: advanced}
+- {name: tile_overlap, type: integer, label: Tile Overlap, description: Extra input pixels on each XY side for segmentation context and instance matching. Native 3D Spotiflow retains at least 192 pixels., default: 96, minimum: 0, cli_tag: --tile-overlap, cli_order: 51, optional: true, section_id: advanced, mode: advanced}
+- {name: tile_depth, type: integer, label: Maximum Tile Depth, description: Maximum core depth for native 3D models. 2D models process one plane at a time., default: 32, minimum: 1, cli_tag: --tile-depth, cli_order: 52, optional: true, section_id: advanced, mode: advanced}
+- {name: tile_overlap_z, type: integer, label: Tile Z Overlap, description: Extra context slices on each side for native 3D models. Native 3D Spotiflow retains at least 64 slices., default: 8, minimum: 0, cli_tag: --tile-overlap-z, cli_order: 53, optional: true, section_id: advanced, mode: advanced}
+- {name: tile_match_threshold, type: float, label: Tile Instance Match, description: Minimum overlap fraction for mutually matched instances across tiles., default: 0.5, minimum: 0.01, maximum: 1.0, cli_tag: --tile-match-threshold, cli_order: 54, optional: true, section_id: advanced, mode: advanced}
 - name: dimension_mode
   type: dropdown
   label: Dimension Mode

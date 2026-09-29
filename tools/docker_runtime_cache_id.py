@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNTIME_INPUTS = (
     ROOT / "Dockerfile.runtime",
     ROOT / "requirements.txt",
+    ROOT / "requirements_cellpose_transformer.txt",
     ROOT / "tools" / "download_models.py",
 )
 

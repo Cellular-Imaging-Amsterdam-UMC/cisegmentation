@@ -376,6 +376,12 @@ class _DatabaseWriter:
                     "DuckDB measurements require the pinned duckdb package"
                 ) from exc
             self.connection = duckdb.connect(str(path))
+            from .resources import MIB, snapshot
+
+            resources = snapshot()
+            self.connection.execute(f"SET threads={resources.cpus}")
+            memory_mb = max(64, min(2048, int(resources.ram_available * 0.25 / MIB)))
+            self.connection.execute(f"SET memory_limit='{memory_mb}MB'")
         elif database_format == "sqlite":
             self.connection = sqlite3.connect(path)
             self.connection.execute("PRAGMA foreign_keys=ON")
@@ -777,7 +783,7 @@ def _bounded_plane_sample(
     plane: np.ndarray, maximum_pixels: int = QUALITY_SAMPLE_PIXELS
 ) -> np.ndarray:
     """Return a deterministic grid sample without copying the level-0 plane."""
-    array = np.asarray(plane)
+    array = plane if getattr(plane, "streamed", False) else np.asarray(plane)
     if array.ndim != 2:
         raise ValueError(f"Image-QC planes must be 2D, got shape {array.shape}")
     stride = max(1, int(math.ceil(math.sqrt(array.size / maximum_pixels))))
@@ -1112,14 +1118,21 @@ def _relationship_rows(
     scales: dict[str, float],
     first_relationship_id: int,
 ) -> tuple[list[tuple], int]:
-    overlap = (first_labels > 0) & (second_labels > 0)
-    if not np.any(overlap):
-        return [], first_relationship_id
-    pairs, counts = np.unique(
-        np.column_stack((first_labels[overlap], second_labels[overlap])),
-        axis=0,
-        return_counts=True,
-    )
+    if getattr(first_labels, "streamed", False) or getattr(second_labels, "streamed", False):
+        from .streaming import overlap_counts
+
+        overlaps = overlap_counts(first_labels, second_labels)
+        pairs = np.asarray(sorted(overlaps), dtype=np.uint32).reshape(-1, 2)
+        counts = np.asarray([overlaps[tuple(pair)] for pair in pairs])
+    else:
+        overlap = (first_labels > 0) & (second_labels > 0)
+        if not np.any(overlap):
+            return [], first_relationship_id
+        pairs, counts = np.unique(
+            np.column_stack((first_labels[overlap], second_labels[overlap])),
+            axis=0,
+            return_counts=True,
+        )
     best_first: dict[int, int] = {}
     best_second: dict[int, int] = {}
     for (first_label, second_label), count in zip(pairs, counts):
@@ -1245,20 +1258,67 @@ def write_measurements_database(
             next_image_id += 1
             image_id = next_image_id
             source = result.source
+            if getattr(source.data, "streamed", False):
+                from .streaming import ChunkCache
+
+                # Source pixels and finalized labels are immutable in this phase.
+                from .resources import MIB, snapshot
+
+                cache = ChunkCache(
+                    min(64 * MIB, max(MIB, snapshot().ram_available // 64))
+                )
+                source.data.cache = cache
+                for label_array in getattr(result.labels, "arrays", [result.labels]):
+                    label_array.cache = cache
             t, c, z, y, x = source.data.shape
             plate = source.resource.plate_path
             output_resource = "/".join(plate) if plate else ""
             writer.insert(
                 "images",
-                ("image_id", "run_id", "source_store", "source_resource_path", "output_resource_path", "image_name", "plate_row", "plate_column", "field_index", "size_t", "size_c", "size_z", "size_y", "size_x", "source_dtype", "scale_t", "scale_z_um", "scale_y_um", "scale_x_um"),
-                [(
-                    image_id, 1, source.resource.store_path.name,
-                    source.resource.image_path, output_resource, source.resource.name,
-                    plate[0] if plate else None, plate[1] if plate else None,
-                    plate[2] if plate else None, t, c, z, y, x, source.source_dtype,
-                    _finite_scale(source.scales, "t"), _finite_scale(source.scales, "z"),
-                    _finite_scale(source.scales, "y"), _finite_scale(source.scales, "x"),
-                )],
+                (
+                    "image_id",
+                    "run_id",
+                    "source_store",
+                    "source_resource_path",
+                    "output_resource_path",
+                    "image_name",
+                    "plate_row",
+                    "plate_column",
+                    "field_index",
+                    "size_t",
+                    "size_c",
+                    "size_z",
+                    "size_y",
+                    "size_x",
+                    "source_dtype",
+                    "scale_t",
+                    "scale_z_um",
+                    "scale_y_um",
+                    "scale_x_um",
+                ),
+                [
+                    (
+                        image_id,
+                        1,
+                        source.resource.store_path.name,
+                        source.resource.image_path,
+                        output_resource,
+                        source.resource.name,
+                        plate[0] if plate else None,
+                        plate[1] if plate else None,
+                        plate[2] if plate else None,
+                        t,
+                        c,
+                        z,
+                        y,
+                        x,
+                        source.source_dtype,
+                        _finite_scale(source.scales, "t"),
+                        _finite_scale(source.scales, "z"),
+                        _finite_scale(source.scales, "y"),
+                        _finite_scale(source.scales, "x"),
+                    )
+                ],
             )
             channel_ids = []
             channel_rows = []
@@ -1333,14 +1393,23 @@ def write_measurements_database(
             )
 
             for timepoint in range(result.labels.shape[0]):
-                arrays = [np.asarray(result.labels[timepoint, index], dtype=np.uint32) for index in range(result.labels.shape[1])]
+                streaming = getattr(result.labels, "streamed", False)
+                arrays = [result.labels[timepoint, index] if streaming else np.asarray(result.labels[timepoint, index], dtype=np.uint32) for index in range(result.labels.shape[1])]
                 object_maps: list[dict[int, dict[str, Any]]] = []
                 field_type_counts: dict[str, int] = {}
                 for label_index, labels in enumerate(arrays):
                     object_rows = []
                     intensity_rows = []
                     object_map: dict[int, dict[str, Any]] = {}
-                    for region in regionprops(labels):
+                    if streaming:
+                        from .streaming import iter_regions
+
+                        regions = iter_regions(labels)
+                    else:
+                        regions = regionprops(labels)
+                    object_count = 0
+                    for region in regions:
+                        object_count += 1
                         next_object_id += 1
                         label_value = int(region.label)
                         shape, metadata = _shape_values(
@@ -1359,16 +1428,21 @@ def write_measurements_database(
                         )
                         object_rows.append(prefix + tuple(shape[name] for name in OBJECT_COLUMNS[8:]))
                         metadata["object_id"] = next_object_id
-                        object_map[label_value] = metadata
+                        object_map[label_value] = {name: value for name, value in metadata.items() if name not in {"region_mask", "region_slice"}}
                         region_mask = metadata["region_mask"]
                         region_slice = metadata["region_slice"]
                         for channel_index, channel_id in enumerate(channel_ids):
                             pixel_values = source.data[timepoint, channel_index][region_slice][region_mask]
                             intensity_rows.append(_intensity_row(next_object_id, channel_id, pixel_values))
+                        if streaming and len(object_rows) >= 1024:
+                            writer.insert("objects", OBJECT_COLUMNS, object_rows)
+                            writer.insert("intensity_measurements", INTENSITY_COLUMNS, intensity_rows)
+                            object_rows.clear()
+                            intensity_rows.clear()
                     writer.insert("objects", OBJECT_COLUMNS, object_rows)
                     writer.insert("intensity_measurements", INTENSITY_COLUMNS, intensity_rows)
-                    counts["objects"] += len(object_rows)
-                    counts["intensities"] += len(intensity_rows)
+                    counts["objects"] += object_count
+                    counts["intensities"] += object_count * len(channel_ids)
                     object_maps.append(object_map)
 
                 field_quality_records.append(

@@ -44,7 +44,7 @@ root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.3.0`
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.0`
 image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
@@ -66,6 +66,57 @@ folder, never a child of the input OME-Zarr. For full-data output, a verified
 source copy runs alongside label finalization and generated labels are committed
 only to that copy. The final store and database become visible only after every
 phase succeeds.
+
+## Streaming large fields
+
+Large fields automatically use streaming when XY exceeds 4096 pixels or the
+input exceeds a conservative live RAM budget. Resources are discovered from
+Slurm CPU/memory allocations, CPU affinity, container/cgroup limits, available
+host RAM, and the currently visible CUDA device. These checks run before every
+tile. They do not assume a fixed 4 CPU / 16 GB / 12 GB cluster profile.
+
+Streaming reads one region with a halo, runs the selected adapter, matches
+instance IDs against completed overlaps, and writes only the tile core. RAM or
+GPU pressure reduces pending tile sizes; catchable allocation errors retry the
+current tile at a smaller size. Pool allocation failures also reduce the number
+of field workers. Final cell/nucleus matching, label pyramids, and measurement
+database writing remain bounded. Measurement crops share a bounded decoded
+chunk cache, and database shards merge in batches of 1024 rows.
+
+Advanced controls are **Streaming Mode** (`auto` or `on`), **Tile Size** (core XY,
+default 1024), **Tile Overlap** (halo on each side, default 96), **Tile Depth**
+(native 3D core Z, default 32), **Tile Overlap Z** (default 8), and **Tile Match
+Threshold** (default 0.5). Slice-wise models process one Z plane at a time.
+Native 3D Spotiflow retains at least 64 slices of Z context on each side,
+matching the bundled checkpoints' two 32-voxel overlap blocks, and at least
+192 pixels of XY context, validated against a positive 3D boundary test.
+The effective halo is recorded in provenance and included in memory estimates.
+Choose overlap large enough to include the expected objects and model context.
+Smaller tiles can change model predictions through local normalization/context;
+streaming does not promise pixel-identical results to whole-image inference.
+An allocation that cannot fit the model and a minimum tile plus overlap fails
+with a resource message. Exception recovery cannot guarantee recovery from an
+operating-system kill. An individual object whose measurement crop exceeds the
+bounded read budget also requires more resources or a smaller object.
+
+The log and OME-Zarr provenance record tile counts, allocation retries, pressure
+splits, smallest cores, overlap, and initial/minimum available resources.
+Scratch disk must hold raw labels, finalized labels, their pyramids, and database
+shards until the existing atomic publication finishes. Input stores are preserved.
+
+`tools/tilescan_resource_smoke.py` runs a direct StarDist workflow or overlapping
+native model-family tests and records resource samples/output pyramid checks.
+For example, on an allocated GPU node:
+
+```bash
+python tools/tilescan_resource_smoke.py --input /data/large.ome.zarr \
+  --output /data/test-output --device cuda --measurements duckdb
+```
+
+For testing a smaller GPU on a larger physical card, its optional
+`--gpu-memory-mb 12288` sets `CISEGMENTATION_GPU_MEMORY_LIMIT_MB` and a real
+PyTorch per-process allocator cap inherited by inference workers. Production
+runs normally omit this override and discover their actual device/allocation.
 
 For a direct local run:
 

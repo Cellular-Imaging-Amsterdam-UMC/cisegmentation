@@ -240,7 +240,7 @@ def _to_native_byte_order(data: np.ndarray) -> np.ndarray:
     return array.astype(array.dtype.newbyteorder("="), copy=False)
 
 
-def read_image(resource: ImageResource) -> ImageData:
+def read_image(resource: ImageResource, *, lazy: bool = False) -> ImageData:
     import zarr
 
     root = zarr.open_group(str(resource.store_path), mode="r")
@@ -254,12 +254,17 @@ def read_image(resource: ImageResource) -> ImageData:
     multiscale = multiscales[0]
     dataset_path = str(multiscale["datasets"][0]["path"])
     array = group[dataset_path]
-    raw = np.asarray(array)
-    source_dtype = str(raw.dtype)
-    axes = _axis_names(multiscale, raw.ndim)
+    source_dtype = str(array.dtype)
+    axes = _axis_names(multiscale, array.ndim)
     scales = _scale_map(multiscale, axes)
+    if lazy:
+        from .streaming import ArrayView
+
+        data = ArrayView(array, axes, tuple("tczyx"))
+    else:
+        data = _to_native_byte_order(_to_tczyx(np.asarray(array), axes))
     return ImageData(
-        _to_native_byte_order(_to_tczyx(raw, axes)),
+        data,
         axes,
         scales,
         attrs,
@@ -486,7 +491,7 @@ def existing_label_names(resource: ImageResource) -> list[str]:
 
 
 def read_native_label(
-    resource: ImageResource, group_name: str, *, store_path: str | Path | None = None
+    resource: ImageResource, group_name: str, *, store_path: str | Path | None = None, lazy: bool = False
 ) -> np.ndarray:
     """Read one native label level as TCZYX."""
     import zarr
@@ -496,6 +501,11 @@ def read_native_label(
     group = root[f"{prefix}labels/{group_name}"]
     multiscale = (_attrs(group).get("multiscales") or [{}])[0]
     dataset = str((multiscale.get("datasets") or [{"path": "0"}])[0]["path"])
+    if lazy:
+        from .streaming import ArrayView
+
+        array = group[dataset]
+        return ArrayView(array, _axis_names(multiscale, array.ndim), tuple("tczyx"))
     raw = np.asarray(group[dataset])
     axes = _axis_names(multiscale, raw.ndim)
     result = _to_tczyx(raw, axes)
@@ -515,6 +525,11 @@ def write_native_label_groups(
 
     if len(generated_group_names) != result.labels.shape[1]:
         raise ValueError("Generated label group names do not match label channels")
+    if getattr(result.labels, "streamed", False):
+        from .streaming import write_streamed_label_groups
+
+        write_streamed_label_groups(store_path, resource_path, result, generated_group_names, final_group_names)
+        return
     root = zarr.open_group(str(store_path), mode="a")
     group = root[resource_path] if resource_path else root
     labels_group = group.require_group("labels")

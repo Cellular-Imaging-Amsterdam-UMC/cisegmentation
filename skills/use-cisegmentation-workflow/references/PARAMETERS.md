@@ -1,5 +1,15 @@
 # Parameters
 
+Streaming parameters (advanced): `streaming_mode` is `auto` (default) or `on`.
+`tile_size` (default 1024, minimum 64) is an upper bound on XY core size;
+`tile_overlap` (default 96) supplies context on each XY side. Native 3D models
+also use `tile_depth` (default 32) and `tile_overlap_z` (default 8).
+Native 3D Spotiflow enforces minimum halos of 64 slices in Z and 192 pixels
+in XY; effective overlaps are included in provenance and memory estimates.
+`tile_match_threshold` (default 0.5, greater than 0 and at most 1) controls
+mutual instance matching in overlapping predictions. Allocation discovery and
+live memory checks can reduce cores below the configured upper bound.
+
 Use the descriptor from the configured workflow revision as the executable
 contract. Reject undocumented values and do not silently introduce parameters.
 All channel numbers are one-based and must not exceed the selected image's

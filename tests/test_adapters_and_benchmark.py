@@ -123,6 +123,92 @@ def test_torch_runtime_suppresses_only_irrelevant_triton_warning():
     assert "a different PyTorch warning" in messages
 
 
+@pytest.mark.parametrize(
+    "checkpoint,expected",
+    [
+        ("transformer_cp3", {"backbone": "transformer"}),
+        ("neurips_cellpose_transformer", {"backbone": "transformer"}),
+        ("neurips_cellpose_default", {"nchan": 3}),
+        ("cyto3", {}),
+    ],
+)
+def test_cellpose_checkpoint_uses_its_matching_network(monkeypatch, checkpoint, expected):
+    constructed = []
+    evaluated_channels = []
+
+    class FakeModel:
+        diam_mean = 30.0
+
+        def __init__(self, *, gpu, pretrained_model, **options):
+            constructed.append((pretrained_model, options))
+
+        def eval(self, image, **kwargs):
+            evaluated_channels.append(image.shape[-1])
+            np.testing.assert_array_equal(image[..., 0], 3)
+            np.testing.assert_array_equal(image[..., 1], 5)
+            if checkpoint == "neurips_cellpose_default":
+                assert not np.any(image[..., 2])
+            return np.zeros(image.shape[:2], dtype=np.uint32), None, None
+
+    module = ModuleType("cellpose3_legacy")
+    module.models = SimpleNamespace(CellposeModel=FakeModel)
+    monkeypatch.setitem(sys.modules, "cellpose3_legacy", module)
+    clear_model_cache()
+    try:
+        spec = get_model_spec("cellpose3:" + checkpoint)
+        labels, _ = segment_czyx(
+            np.stack([np.full((1, 8, 9), 3), np.full((1, 8, 9), 5)]).astype("u2"),
+            spec,
+            SegmentationSettings(model=spec.id, target="cells", nuclei_channel=2, device="cpu"),
+            {"x": 0.5, "y": 0.5},
+        )
+        assert labels.shape == (1, 8, 9)
+        assert constructed == [(checkpoint, expected)]
+        assert evaluated_channels == [3 if expected.get("nchan") == 3 else 2]
+    finally:
+        clear_model_cache()
+
+
+def test_instanseg_rejects_oversized_rescaled_plane_before_inference(monkeypatch):
+    from cisegmentation import adapters
+
+    def unexpected_inference(*args, **kwargs):
+        raise AssertionError("Oversized resampling must not be allocated")
+
+    model = SimpleNamespace(
+        instanseg=SimpleNamespace(pixel_size=0.5), eval_small_image=unexpected_inference
+    )
+    monkeypatch.setattr(adapters, "_cached_model", lambda *args: (model, {}))
+    with pytest.raises(RuntimeError, match="4200, 4200"):
+        _segment_instanseg(
+            np.zeros((1, 1, 2100, 2100), dtype="u2"),
+            get_model_spec("instanseg:single_channel_nuclei"),
+            SegmentationSettings(primary_channel=1),
+            1.0,
+        )
+
+
+def test_cellpose_transformer_padding_preserves_flows_style_and_original_shape():
+    import torch
+    from cisegmentation.adapters import _pad_cellpose_transformer_input
+
+    class Network(torch.nn.Module):
+        def forward(self, image):
+            assert image.shape[-2] % 32 == image.shape[-1] % 32 == 0
+            return image + 1, image.sum(dim=(1, 2, 3))
+
+    network = Network()
+    _pad_cellpose_transformer_input(network)
+    wrapped = network.forward
+    _pad_cellpose_transformer_input(network)
+    assert network.forward is wrapped
+    for height, width in [(96, 80), (80, 96), (80, 80), (96, 96)]:
+        source = torch.arange(2 * 3 * height * width).reshape(2, 3, height, width).float()
+        flows, style = network(source)
+        torch.testing.assert_close(flows, source + 1)
+        torch.testing.assert_close(style, source.sum(dim=(1, 2, 3)))
+
+
 def test_spotiflow_points_are_unique_single_pixels():
     points = np.array([[2.2, 3.7], [5.0, 6.0]])
     labels = points_to_labels(points, (10, 10))
@@ -235,6 +321,19 @@ def test_center_crop_is_centered_and_at_most_1024():
     cropped, info = center_crop(image)
     assert cropped.shape == (2, 3, 1024, 1024)
     assert info == {"x": 38, "y": 138, "width": 1024, "height": 1024}
+
+
+def test_bounded_stardist_region_does_not_add_inner_label_seams():
+    shapes = []
+    class Model:
+        def predict_instances(self, image, **kwargs):
+            shapes.append(image.shape)
+            labels = np.zeros(image.shape, dtype=np.uint32)
+            labels[1000:1050, 1000:1050] = 1
+            return labels, {}
+    labels, _ = _predict_stardist_tiled(Model(), np.zeros((1216, 1216), dtype=np.float32), None, None, bounded=True)
+    assert shapes == [(1216, 1216)]
+    assert labels[1010, 1010] == labels[1040, 1040] == 1
 
 
 def test_benchmark_renders_refined_spotiflow_as_masks(monkeypatch):

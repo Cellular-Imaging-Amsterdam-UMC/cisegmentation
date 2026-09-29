@@ -162,3 +162,23 @@ def test_native_3d_spotiflow_refinement_requires_slice_mode():
             "cpu",
             {"x": 0.5, "y": 0.5},
         )
+
+
+@pytest.mark.parametrize("mode,depth", [("auto", 1), ("auto", 3), ("slice-2d", 3)])
+def test_3d_checkpoint_always_receives_a_volume(monkeypatch, mode, depth):
+    calls = []
+    class Model:
+        _prob_thresh = [0.5]
+        def predict(self, image, **kwargs):
+            calls.append(image.shape)
+            assert image.ndim == 3
+            return np.array([[0, 2, 3]], dtype=np.float32), None
+    monkeypatch.setattr(adapters, "_cached_model", lambda *args: (Model(), {}))
+    labels, _ = adapters._segment_spotiflow(
+        np.zeros((1, depth, 8, 8), dtype=np.uint16),
+        get_model_spec("spotiflow:smfish_3d"),
+        SegmentationSettings(model="spotiflow:smfish_3d", target="spots", dimension_mode=mode),
+        "cpu", {"x": 0.5, "y": 0.5},
+    )
+    assert labels.shape == (depth, 8, 8)
+    assert calls == ([(1, 8, 8)] * depth if mode == "slice-2d" else [(depth, 8, 8)])

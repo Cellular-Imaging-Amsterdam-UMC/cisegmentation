@@ -70,8 +70,14 @@ def _open_database(path: Path, database_format: str):
     if database_format == "sqlite":
         return sqlite3.connect(path)
     import duckdb
+    from .resources import MIB, snapshot
 
-    return duckdb.connect(str(path), read_only=True)
+    connection = duckdb.connect(str(path), read_only=True)
+    resources = snapshot()
+    limit_mb = max(64, min(2048, resources.ram_available // (4 * MIB)))
+    connection.execute(f"SET memory_limit = '{limit_mb}MB'")
+    connection.execute(f"SET threads = {resources.cpus}")
+    return connection
 
 
 def _table_rows(connection, table: str) -> tuple[tuple[str, ...], list[tuple]]:
@@ -86,6 +92,19 @@ def _remap(row: tuple, offsets: dict[int, int]) -> tuple:
     for index, offset in offsets.items():
         values[index] = int(values[index]) + offset
     return tuple(values)
+
+
+def _copy_large_table(connection, writer, table: str, offsets: dict[int, int]) -> int:
+    """Copy object-sized tables in bounded batches, including their ID mapping."""
+    columns = tuple(
+        str(row[1]) for row in connection.execute(f"PRAGMA table_info('{table}')").fetchall()
+    )
+    cursor = connection.execute(f"SELECT * FROM {table}")
+    count = 0
+    while rows := cursor.fetchmany(1024):
+        writer.insert(table, columns, [_remap(tuple(row), offsets) for row in rows])
+        count += len(rows)
+    return count
 
 
 def merge_measurement_shards(
@@ -215,57 +234,17 @@ def merge_measurement_shards(
                     for row in sources
                 ],
             )
-            object_columns, objects = _table_rows(connection, "objects")
-            writer.insert(
-                "objects",
-                object_columns,
-                [
-                    _remap(
-                        row,
-                        {
-                            0: offsets["object"],
-                            1: offsets["image"],
-                            2: offsets["label"],
-                        },
-                    )
-                    for row in objects
-                ],
-            )
-            intensity_columns, intensities = _table_rows(
-                connection, "intensity_measurements"
-            )
-            writer.insert(
-                "intensity_measurements",
-                intensity_columns,
-                [
-                    _remap(
-                        row,
-                        {0: offsets["object"], 1: offsets["channel"]},
-                    )
-                    for row in intensities
-                ],
-            )
-            relationship_columns, relationships = _table_rows(
-                connection, "relationships"
-            )
-            writer.insert(
-                "relationships",
-                relationship_columns,
-                [
-                    _remap(
-                        row,
-                        {
-                            0: offsets["relationship"],
-                            1: offsets["image"],
-                            3: offsets["object"],
-                            4: offsets["object"],
-                            5: offsets["label"],
-                            6: offsets["label"],
-                        },
-                    )
-                    for row in relationships
-                ],
-            )
+            object_count = _copy_large_table(connection, writer, "objects", {
+                0: offsets["object"], 1: offsets["image"], 2: offsets["label"],
+            })
+            intensity_count = _copy_large_table(connection, writer, "intensity_measurements", {
+                0: offsets["object"], 1: offsets["channel"],
+            })
+            relationship_count = _copy_large_table(connection, writer, "relationships", {
+                0: offsets["relationship"], 1: offsets["image"],
+                3: offsets["object"], 4: offsets["object"],
+                5: offsets["label"], 6: offsets["label"],
+            })
             quality_columns, quality_rows = _table_rows(
                 connection, "image_quality_measurements"
             )
@@ -296,14 +275,14 @@ def merge_measurement_shards(
 
             counts["images"] += len(images)
             counts["label_sets"] += len(labels)
-            counts["objects"] += len(objects)
-            counts["intensities"] += len(intensities)
-            counts["relationships"] += len(relationships)
+            counts["objects"] += object_count
+            counts["intensities"] += intensity_count
+            counts["relationships"] += relationship_count
             offsets["image"] += len(images)
             offsets["channel"] += len(channels)
             offsets["label"] += len(labels)
-            offsets["object"] += len(objects)
-            offsets["relationship"] += len(relationships)
+            offsets["object"] += object_count
+            offsets["relationship"] += relationship_count
             progress.advance()
 
         if log:

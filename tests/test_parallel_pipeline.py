@@ -420,8 +420,9 @@ def test_failed_full_data_publication_restores_source_byte_for_byte(
     ).exists()
 
 
-def test_cuda_oom_retry_halves_inference_pool(
-    tmp_path, inputfolder, monkeypatch
+@pytest.mark.parametrize("memory_flag", ["cuda_oom", "memory_oom"])
+def test_memory_oom_retry_halves_inference_pool(
+    tmp_path, inputfolder, monkeypatch, memory_flag
 ):
     resources = [
         ImageResource(inputfolder / "nuclei-small.ome.zarr", "field1"),
@@ -452,7 +453,7 @@ def test_cuda_oom_retry_halves_inference_pool(
                     "resource_path": payloads[0]["resource"].image_path,
                     "error": "CUDA out of memory",
                     "traceback": "CUDA out of memory",
-                    "cuda_oom": True,
+                    memory_flag: True,
                 }
             ]
         resource = payloads[0]["resource"]

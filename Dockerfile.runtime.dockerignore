@@ -1,5 +1,6 @@
 **
 !Dockerfile.runtime
 !requirements.txt
+!requirements_cellpose_transformer.txt
 !tools/
 !tools/download_models.py

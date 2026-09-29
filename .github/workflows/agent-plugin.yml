@@ -52,6 +52,7 @@ jobs:
           docker build
           --file Dockerfile
           --build-arg RUNTIME_CACHE_IMAGE=python:3.11-slim-bookworm
+          --build-arg INSTALL_CHECKPOINT_DEPENDENCIES=false
           --tag w_cisegmentation:latest
           .
       - name: Build ${{ matrix.dockerfile }}

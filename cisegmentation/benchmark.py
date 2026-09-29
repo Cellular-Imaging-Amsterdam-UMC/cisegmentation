@@ -257,6 +257,7 @@ def run_benchmark(
 ) -> tuple[Path, bool]:
     settings.validate_steps()
     first_t, crop = center_crop(image.data[0])
+    first_t = np.asarray(first_t)
     cases = _benchmark_cases(settings)
     emit(log, f"Benchmark gallery: running {len(cases)} model/channel case(s).")
     runs: list[dict[str, Any]] = []

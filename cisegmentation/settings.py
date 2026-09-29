@@ -80,6 +80,12 @@ class SegmentationSettings:
     measurements_database: str = "duckdb"
     remove_border_cells: bool = True
     labels_log_info: bool = False
+    streaming_mode: str = "auto"
+    tile_size: int = 1024
+    tile_overlap: int = 96
+    tile_depth: int = 32
+    tile_overlap_z: int = 8
+    tile_match_threshold: float = 0.5
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -155,6 +161,14 @@ class SegmentationSettings:
             raise ValueError("Maximum inference workers must be zero or greater")
         if self.max_measurement_workers < 0:
             raise ValueError("Maximum measurement workers must be zero or greater")
+        if self.streaming_mode not in {"auto", "on"}:
+            raise ValueError("Streaming mode must be auto or on")
+        if self.tile_size < 64 or self.tile_depth < 1:
+            raise ValueError("Tile size must be at least 64 and tile depth at least 1")
+        if self.tile_overlap < 0 or self.tile_overlap_z < 0:
+            raise ValueError("Tile overlaps must be zero or greater")
+        if not 0 < self.tile_match_threshold <= 1:
+            raise ValueError("Tile match threshold must be greater than zero and at most one")
 
 
 _LEGACY_FIELDS = {

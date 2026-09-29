@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git build-essential libgomp1 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt requirements_cellpose_transformer.txt /app/
 # PyTorch declares Triton for torch.compile/Inductor. This inference-only
 # workflow uses eager execution; every supported model family is GPU
 # smoke-tested without Triton, saving about 672 MB unpacked.
