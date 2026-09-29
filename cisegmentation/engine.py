@@ -776,6 +776,10 @@ def _run_parallel_store(
     stage_dir.mkdir(parents=True, exist_ok=True)
     emit(log, f"Temporary working directory: {stage_dir}")
     measurement_summary = None
+    staged_database = stage_dir / database_path.name if database_path is not None else None
+    geometry_path = None
+    staged_geometry = None
+    extension_summary = None
     finalization: dict[str, dict] = {}
     copy_executor: ThreadPoolExecutor | None = None
     copy_future = None
@@ -855,12 +859,25 @@ def _run_parallel_store(
                     generated_names=generated_names,
                     finalization=finalization,
                     shard_dir=shard_dir,
-                    output_path=database_path,
+                    output_path=staged_database,
                     output_ome_zarr=output_path,
                     output_store_uuid=output_store_uuid,
                     log=log,
                 )
             )
+            if settings.measurement_extensions_enabled():
+                from .measurement_extensions import write_extensions
+
+                extension_summary, staged_geometry = write_extensions(
+                    staged_database, settings.measurements_database,
+                    resources, overlay_partial, settings, stage_dir=stage_dir,
+                    finalization=finalization, log=log,
+                )
+                measurement_summary["runtime_seconds"] += extension_summary["runtime_seconds"]
+                if staged_geometry is not None:
+                    geometry_path = database_path.with_name(
+                        database_path.name.replace("_measurements.", "_geometry.")
+                    )
         parallelism = {
             **inference_parallelism,
             "label_finalization": label_parallelism,
@@ -868,6 +885,8 @@ def _run_parallel_store(
         }
         if copy_summary is not None:
             parallelism["source_data_copy"] = copy_summary
+        if extension_summary is not None:
+            parallelism["measurement_extensions"] = extension_summary
         emit(
             log,
             "Parallel phases: "
@@ -935,8 +954,6 @@ def _run_parallel_store(
             if overlay_partial.exists():
                 shutil.rmtree(overlay_partial)
             publish_overlay(full_data_partial, output_path)
-            if stage_dir.exists():
-                shutil.rmtree(stage_dir)
             emit(
                 log,
                 f"Published copied full-data output; source retained: "
@@ -944,9 +961,13 @@ def _run_parallel_store(
             )
         else:
             publish_overlay(overlay_partial, output_path)
-            if stage_dir.exists():
-                shutil.rmtree(stage_dir)
             emit(log, f"Published labels-only overlay: {output_path}")
+        if staged_database is not None:
+            staged_database.replace(database_path)
+        if staged_geometry is not None:
+            staged_geometry.replace(geometry_path)
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir)
     except Exception:
         copy_cancel.set()
         if copy_executor is not None:
@@ -955,11 +976,11 @@ def _run_parallel_store(
             shutil.rmtree(stage_dir)
         if overlay_partial.exists():
             shutil.rmtree(overlay_partial)
-        if database_path is not None:
-            database_path.unlink(missing_ok=True)
         recover_label_commit(store)
         raise
     outputs = [output_path]
+    if geometry_path is not None:
+        outputs.append(geometry_path)
     if measurement_summary is not None and database_path is not None:
         outputs.append(database_path)
         emit(

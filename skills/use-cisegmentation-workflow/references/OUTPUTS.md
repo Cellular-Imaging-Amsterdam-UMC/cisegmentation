@@ -28,6 +28,21 @@ object morphology and locations, per-original-channel intensity statistics,
 and mask relationships. Use the separate
 `analyze-cisegmentation-measurements` skill for substantive analysis.
 
+When geometry export is enabled, additionally expect one companion:
+`<source>__cisegmentation_geometry.duckdb` or
+`<source>__cisegmentation_geometry.sqlite`. Verify its output identity against
+the main measurement database. Polygons preserve final-mask holes and disconnected
+components; 3D masks use per-Z outlines. Spotiflow point geometry preserves native
+subpixel XYZ positions. Export does not imply automatic viewer display.
+
+Base schema 5 tables/views and raster labels remain unchanged. Optional extension
+schema 1 adds neighbor/contact measurements, compartment spot counts, automatic
+Otsu/Pearson/Manders measurements and trajectories. Only cells/nuclei can have
+parent-daughter links; spots track independently without parent segmentation.
+Check registry rows in `measurement_extensions`, NULL reasons, calibration and
+time units before interpreting optional results. Missing physical timing uses
+frames, including micrometers-per-frame speed.
+
 ## Benchmark runs
 
 Benchmark mode produces only:

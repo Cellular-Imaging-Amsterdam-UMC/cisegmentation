@@ -505,3 +505,8 @@ LIMIT 25
 
 Run filters and aggregation inside the database before using `.df()` or
 `pandas.read_sql_query`. Close the connection when finished.
+# Optional features
+
+For separately versioned spatial, colocalization, tracking and geometry output,
+read [EXTENSIONS.md](EXTENSIONS.md). The base schema documented below remains
+version 5; optional features are disabled by default.

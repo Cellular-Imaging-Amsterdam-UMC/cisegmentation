@@ -1,8 +1,8 @@
 ---
 name: analyze-cisegmentation-measurements
-description: Analyze, query, and explain CI Segmentation measurement databases in DuckDB or SQLite for object morphology, per-channel intensity statistics, label sets, image or HCS plate metadata, mask relationships, focus assignments, SQL, pandas, and interpretation of CI Segmentation measurement results.
+description: Analyze CI Segmentation DuckDB or SQLite databases for morphology, intensity, mask relationships, spot assignments, spatial neighbors and contacts, Pearson/Manders colocalization, trajectories, cell/nucleus divisions, and linked WKB polygons or subpixel spot points; includes SQL, pandas, calibration and interpretation.
 metadata:
-  version: "5"
+  version: "6"
 ---
 
 # Instructions
@@ -19,6 +19,11 @@ references/REFERENCE.md
 
 Use that resource as the authoritative reference for the database schema,
 measurement semantics, convenience views, and query examples.
+
+For spatial, colocalization, tracking or geometry questions, also load
+[EXTENSIONS.md](references/EXTENSIONS.md). Base schema version 5 alone does
+not imply optional features exist. Read `measurement_extensions` if present;
+geometry files instead expose `geometry_info` and `geometries`.
 
 ## Workflow
 
@@ -108,6 +113,16 @@ database_files
 - Distinguish 2D masks, true 3D masks, and point-only objects.
 - Do not claim that intensities were normalized or background-corrected.
 - Separate database observations from biological interpretation.
+- Keep frame-local `label_value` separate from `object_id` and `track_id`.
+  Track IDs identify trajectory segments; daughter segments have new IDs.
+- Spot-only runs do not require cells/nuclei. Missing compartments mean no
+  assignments; existing compartments with no assigned spots have zero counts.
+- Check `time_unit` before interpreting speed. Missing physical timing means
+  micrometers per frame, not micrometers per second.
+- Keep directional Manders coefficients distinct; NULL with a reason records
+  an undefined statistic. Otsu thresholds are automatic and sampled.
+- Raster masks remain authoritative. Geometry uses pixel-centre coordinates,
+  half-integer pixel edges, WKB and explicit calibrated transforms.
 
 ## Response
 

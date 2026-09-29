@@ -10,8 +10,9 @@ and Spotiflow with optional local mask refinement from one CUDA 12.6 environment
 - Input: one or more top-level `.ome.zarr` stores in `/data/in`, including HCS plates.
 - Normal output: `<source>__cisegmentation.ome.zarr` in `/data/out`, containing
   native OME-Zarr label groups. By default the source store is copied with its
-  original pixels and remains untouched; disabling **Include Original Data** writes a sparse,
-  mergeable labels-only overlay and leaves the source untouched.
+  original pixels and remains untouched. A configured BIOMERO shallower can remove
+  verified duplicate arrays before transfer. The UI no longer offers Include
+  Original Data; legacy CLI flags retain their labels-only overlay behavior.
 - Benchmark output: **only** `benchmark_gallery_<image>.ome.zarr`.
 - Axes are normalized to `TCZYX`; time and Z are preserved in normal runs.
 - Output OME-Zarrs and schema-v5 measurement databases share an
@@ -44,7 +45,7 @@ root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.1`
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.2`
 image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
@@ -177,7 +178,7 @@ converted internally using the OME-Zarr XY scale metadata.
 | Step 1 Expansion Distance | Sets the maximum XY expansion distance in µm. Physical X/Y scales are read from OME-Zarr metadata. Expansion produces matched cell, nucleus, and cytoplasm channels directly. |
 | Step 2: Nuclei Detection (`--nucleus-model`) / Channel | Selects `Skip` or an independent nucleus model. When cells and nuclei are both available, they are matched by overlap; only the largest nucleus per cell is retained, cells without nuclei are removed, and cytoplasm is written with shared IDs. Step 2 may repeat the nucleus model used for Step 1 expansion. |
 | Step 3a–3d: Foci Detection (`--foci-model-1` … `--foci-model-4`) / Channel | Step 3a is a beginner selector; Steps 3b–3d appear first in the advanced options. Each offers `Skip`, Spotiflow, `SD_Foci_*` StarDist, and Cellpose 3 `bact` models. Repeating models or channels is allowed. StarDist outputs are named `foci`; Cellpose bacterial outputs are named `bacteria`. |
-| Include Original Data (`--include-original-data`) | Beginner option, enabled by default. Copy the source pixels to `<source>__cisegmentation.ome.zarr`, add native labels only to that copy, and retain the unchanged input. Disable it to publish a sparse, mergeable labels-only overlay. The legacy `--include-original-channels` argument maps to this option for one compatibility period. |
+| Original data (legacy CLI only: `--include-original-data`) | Removed from the UI. Normal output copies source pixels and final labels, retaining the input. The CLI still accepts false for a labels-only overlay; `--include-original-channels` retains its legacy mapping. |
 | Existing Labels (`--existing-labels`) | `overwrite` (default) replaces generated-name collisions while preserving unrelated labels; `remove` replaces the complete labels tree; `append` preserves all groups and assigns collision-safe suffixes consistently across the plate. |
 | Maximum Inference / Measurement Workers | Advanced caps for automatically sized inference and measurement pools. Zero means automatic based on GPU memory, CPU allocation/affinity, and RAM. GPU sizing uses the greater of PyTorch peak allocation and NVIDIA's complete worker-process memory, reserves at least 2 GiB or 20% of VRAM, and applies a 50% per-worker safety margin. |
 | Labels Log Info (`--labels-log-info`) | Advanced option, disabled by default. Calculate and log per-step and final label counts, foreground fraction, and label size statistics. Leave disabled for faster processing of large fields. |
@@ -235,6 +236,16 @@ commit. A dry run only prints those actions.
 | Spotiflow Local Mask Refinement (`--spotiflow-local-refinement`) | Advanced checkbox, disabled by default. Lightly smooths the selected channel, estimates background and noise around every Spotiflow point, and grows only the seed-connected signal. Growth is bounded to a 1.0 µm radius, overlaps are assigned by local signal-to-noise score, and weak points remain single pixels. Native-3D Spotiflow requires Force slice-wise 2D. The former `--spotiflow-microsam-refinement` flag remains a hidden compatibility alias. |
 | Create Measurements Database (`--measurements-database`) | Beginner selector: `duckdb` (default), `sqlite`, or `skip`. Writes one database per top-level image or HCS screen containing final-object shape/location features, per-original-channel intensity statistics, and pairwise mask relationships. See the [measurements database reference](docs/measurements.md). |
 | Benchmark Gallery (`--benchmark`) | Advanced option. Processes the first deterministic image/field and first timepoint, runs all selectable models for every enabled step, then writes only a 2D XY OME-Zarr gallery. |
+
+Optional spatial measurements (`--spatial-measurements`), channel colocalization
+(`--colocalization`), time-series tracking (`--tracking`) and a separate geometry
+database (`--export-geometry`) are disabled by default. They require DuckDB or
+SQLite measurements and add extension schema 1 while preserving base schema 5
+and raster label values. Cells/nuclei may divide; independent spots never split
+or merge. See [measurement extensions](docs/measurement-extensions.md) for units,
+controls, scientific limits and repeatable validation. Spot-only runs can skip
+both cell and nucleus detection. Retained public inputs and their pyramidal
+OME-Zarr conversion are documented in [public datasets](docs/publicdata.md).
 
 `SD_Nuclei_Versatile` is automatically downsampled to 0.5 µm/px per XY axis
 when the source resolution is finer. By default, its predicted polygons are

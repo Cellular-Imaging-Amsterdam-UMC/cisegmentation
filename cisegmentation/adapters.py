@@ -875,6 +875,10 @@ def _segment_spotiflow(
         )
         detection_seconds = time.perf_counter() - detection_started
         labels = points_to_labels(points, volume.shape)
+        native = {}
+        if settings.measurement_extensions_enabled():
+            from .point_localizations import native_records
+            native["_native_points"] = native_records(points, labels)
         effective.update(
             {
                 "output_mode": "point-locations",
@@ -886,6 +890,7 @@ def _segment_spotiflow(
             "model_cache_hits": int(bool(timing.get("model_cache_hit"))),
             "model_cache_misses": int(not bool(timing.get("model_cache_hit"))),
             "locations_only": True,
+            **native,
             "effective_parameters": effective,
             "spot_detection_seconds": detection_seconds,
             "inference_seconds": detection_seconds,
@@ -913,12 +918,20 @@ def _segment_spotiflow(
     detection_seconds = time.perf_counter() - detection_started
     detected_points = sum(len(points) for points in points_by_plane)
     if not settings.spotiflow_local_refinement:
-        labels = _unique_plane_labels(
-            [
-                points_to_labels(points, volume[z].shape)
-                for z, points in enumerate(points_by_plane)
-            ]
-        )
+        planes = [points_to_labels(points, volume[z].shape)
+                  for z, points in enumerate(points_by_plane)]
+        labels = _unique_plane_labels(planes)
+        native = {}
+        if settings.measurement_extensions_enabled():
+            from .point_localizations import native_records
+            rows, offset = [], 0
+            for z, (points, plane) in enumerate(zip(points_by_plane, planes)):
+                coords = np.column_stack((np.full(len(points), z), points))
+                records = native_records(coords, plane)
+                records[:, 0] += offset
+                rows.append(records)
+                offset += int(plane.max(initial=0))
+            native["_native_points"] = np.concatenate(rows) if rows else np.empty((0, 4))
         effective.update(
             {
                 "output_mode": "point-locations",
@@ -930,6 +943,7 @@ def _segment_spotiflow(
             "model_cache_hits": int(bool(timing.get("model_cache_hit"))),
             "model_cache_misses": int(not bool(timing.get("model_cache_hit"))),
             "locations_only": True,
+            **native,
             "effective_parameters": effective,
             "spot_detection_seconds": detection_seconds,
             "inference_seconds": detection_seconds,
@@ -1009,6 +1023,7 @@ def segment_czyx(
     else:
         raise ValueError(f"No adapter for model family {spec.family}")
     elapsed = time.perf_counter() - start
+    native_points = timing.pop("_native_points", None)
     effective_parameters = timing.pop("effective_parameters", {})
     model_cache_hit = bool(timing.pop("model_cache_hit", False))
     model_cache_hits = int(timing.pop("model_cache_hits", int(model_cache_hit)))
@@ -1040,4 +1055,5 @@ def segment_czyx(
         "locations_only": locations_only,
         "effective_parameters": effective_parameters,
         "timings": timing,
+        **({"_native_points": native_points} if native_points is not None else {}),
     }

@@ -59,7 +59,7 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["cell_nuclei_channel"]["default"] == 0
     assert parameters["nucleus_channel"]["default"] == 1
     assert all(parameters[f"foci_channel_{slot}"]["default"] == 1 for slot in range(1, 5))
-    assert parameters["include_original_data"]["default"] is True
+    assert "include_original_data" not in parameters
     assert parameters["existing_labels"]["default"] == "overwrite"
     assert [
         option["value"] for option in parameters["existing_labels"]["options"]
@@ -84,14 +84,11 @@ def test_bilayers_config_is_structurally_valid():
     assert beginner_names.index("cell_nuclei_channel") + 1 == beginner_names.index(
         "cell_expansion_distance"
     )
-    assert beginner_names[-4:] == [
+    assert beginner_names[-3:] == [
         "remove_border_cells",
-        "include_original_data",
         "existing_labels",
         "measurements_database",
     ]
-    assert parameters["include_original_data"]["mode"] == "beginner"
-    assert parameters["include_original_data"]["section_id"] == "essential"
     assert parameters["benchmark"]["mode"] == "advanced"
     assert parameters["measurements_database"]["default"] == "duckdb"
     assert parameters["measurements_database"]["mode"] == "beginner"
@@ -215,7 +212,7 @@ def test_bilayers_serializes_output_and_existing_label_options():
         load_config(),
         {"include_original_data": False, "existing_labels": "append"},
     )
-    assert "--include-original-data False" in command
+    assert "--include-original-data" not in command
     assert "--existing-labels append" in command
     args = build_parser().parse_args(
         ["--include-original-data", "false", "--existing-labels", "remove"]

@@ -102,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
             default=argparse.SUPPRESS,
             nargs="?" if kind is _bool else None,
             const=True if kind is _bool else None,
+            help=argparse.SUPPRESS if field.name == "include_original_data" else None,
         )
     legacy_types = {
         "cell_step": _bool,

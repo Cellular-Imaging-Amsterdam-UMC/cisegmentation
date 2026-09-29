@@ -55,7 +55,6 @@ Step 3 choices are `spotiflow:general`, `spotiflow:hybiss`,
 | Name | Type | Required | Default | Constraints | Meaning |
 | --- | --- | --- | --- | --- | --- |
 | `remove_border_cells` | boolean | no | `true` | — | Remove cells touching an XY border and their matched nuclei/cytoplasm. |
-| `include_original_data` | boolean | no | `true` | — | Add native labels to the source store and move it to the output; when false, keep the source and write a sparse mergeable labels-only overlay. |
 | `existing_labels` | choice | no | `overwrite` | `remove`, `overwrite`, `append` | Replace the complete labels tree, overwrite generated-name collisions while preserving unrelated labels, or append collision-safe names. |
 | `measurements_database` | choice | no | `duckdb` | `duckdb`, `sqlite`, `skip` | Create object, intensity, and relationship measurements. |
 | `labels_log_info` | boolean | no | `false` | Advanced | Calculate extra label statistics; increases full-array scanning. |
@@ -66,6 +65,43 @@ Generated segmentations are always native OME-Zarr label groups. The legacy
 legacy `write_ome_zarr_labels` argument is accepted but ignored for one
 compatibility period. Benchmark mode emits only a comparison gallery and no
 measurements database.
+
+The UI always produces a complete copy of the original data with final native
+labels, retaining the source. A transfer service may remove verified duplicate
+arrays afterwards. `--include-original-data` remains a legacy CLI flag with its
+original behavior: true copies source pixels; false writes a labels-only overlay.
+The UI no longer offers an Include Original Data checkbox.
+
+## Optional measurements, tracking and geometry
+
+All features below are disabled by default and require DuckDB or SQLite
+measurements. Inspect the configured descriptor: older executables will not
+accept these new options.
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `spatial_measurements` | `false` | Same-label-set/frame nearest neighbors, radius counts, touching neighbors, shared boundaries and spot counts in available cell/nucleus masks. Requires calibrated spatial units. |
+| `spatial_radius_um` | `50.0` | Positive neighbor radius in micrometers. |
+| `colocalization` | `false` | Per-object Pearson and directional Manders values from original channel intensities. |
+| `colocalization_pairs` | `all` | All distinct channel pairs, or comma-separated one-based pairs such as `1:2,1:3`. Thresholds use automatic Otsu; there is no manual override. |
+| `tracking` | `false` | Sparse distance-gated two-stage assignment within each field and label set. Requires calibrated spatial units; timing falls back to frames. |
+| `tracking_divisions` | `true` | Applied only when tracking is enabled, and only to cells/nuclei. Spots, foci, bacteria and cytoplasm remain one-to-one. No merging. |
+| `tracking_distance_um` | `20.0` | Positive maximum displacement for adjacent or gap assignments. |
+| `tracking_max_gap` | `2` | Nonnegative maximum missed frames; two means a three-frame link is permitted. |
+| `export_geometry` | `false` | Separate matching-format database of final-mask polygons/per-Z outlines or native Spotiflow subpixel points. |
+
+Spot-only configuration: `cell_model=skip`, `nucleus_model=skip`,
+`foci_model_1=spotiflow:general`, and the requested `foci_channel_1`.
+Tracking and geometry work without cell/nucleus segmentation. Native subpixel
+coordinates remain available after overlapping tile inference and label remapping.
+Local mask refinement exports final mask polygons instead of native point geometry.
+Segmentation already supports timepoints; tracking adds trajectories to that output.
+
+Memory budgets are discovered from the current allocation and checked live.
+Objects and polygons use bounded crops and database batches, polygon edges spill
+to disk, and assignment uses sparse candidate graphs. If one graph or polygon
+still cannot fit, report the resource error; do not silently change scientific
+distance gates or discard vertices. Additional output requires temporary disk space.
 
 ## Runtime and model tuning
 

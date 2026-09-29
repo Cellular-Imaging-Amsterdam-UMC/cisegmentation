@@ -364,7 +364,7 @@ def _root(parents, value):
     return value
 
 
-def _stitch(predicted, previous, covered, core, parents, threshold):
+def _stitch(predicted, previous, covered, core, parents, threshold, mapping_out=None):
     """Match mutually strongest instances in the already-completed overlap."""
     labels = np.unique(predicted[core])
     labels = labels[labels != 0]
@@ -400,6 +400,8 @@ def _stitch(predicted, previous, covered, core, parents, threshold):
                 raise OverflowError("Instance IDs exceed uint32 storage")
             mapping[label] = len(parents)
             parents.append(len(parents))
+    if mapping_out is not None:
+        mapping_out.update(mapping)
     return remap(predicted[core], mapping)
 
 
@@ -451,6 +453,7 @@ def infer_streamed(
     import zarr
 
     t_size, _, z_size, y_size, x_size = image.data.shape
+    Path(str(path) + ".points.sqlite").unlink(missing_ok=True)
     root = zarr.open_group(str(path), mode="w", zarr_version=2)
     shape = (t_size, z_size, y_size, x_size)
     labels = root.create_dataset(
@@ -569,7 +572,13 @@ def infer_streamed(
                     relative,
                     parents,
                     settings.tile_match_threshold,
+                    point_mapping := {},
                 )
+                points = info.pop("_native_points", None)
+                if points is not None:
+                    from .point_localizations import append_raw
+                    append_raw(str(path) + ".points.sqlite", t, points,
+                               point_mapping, tuple(s.start for s in extended))
                 destination = (t, *(slice(start, end) for start, end in core))
                 labels[destination] = stitched
                 coverage[destination] = True
@@ -684,7 +693,7 @@ def finalize_streamed(payload):
 
     from . import engine
     from .ome_zarr_io import LabelResult, read_image, write_native_label_groups
-    from .parallel_pipeline import _raw_path, _reuse_info
+    from .parallel_pipeline import _raw_path, _reuse_info, _resource_key
     from .reporting import step_record
     from .settings import SegmentationSettings
 
@@ -823,6 +832,12 @@ def finalize_streamed(payload):
         for index, (request, consumer) in enumerate(consumers.get("foci", [])):
             array = consume("foci", t, index)
             mapping = {value: value + next_id for value in label_counts(array)}
+            if settings.measurement_extensions_enabled():
+                from .point_localizations import finalize_points
+                model_pass = next(p for p in passes if any(r.request_id == request.request_id for r in p.requests))
+                finalize_points(str(_raw_path(stage, model_pass, request, resource)) + ".points.sqlite",
+                                stage / "final-points" / f"{_resource_key(resource)}.sqlite",
+                                names[channel], t, mapping)
             prepared = LabelRemap(mapping)
             for key in blocks(array.shape):
                 output[(t, channel, *key)] = remap(np.asarray(array[key]), prepared)
@@ -902,6 +917,7 @@ def finalize_streamed(payload):
         "resource_path": resource.image_path,
         "provenance": provenance,
         "channel_labels": channel_labels,
+        "point_localizations": str(stage / "final-points" / f"{_resource_key(resource)}.sqlite"),
         "zarr_write_seconds": time.perf_counter() - write_started,
     }
 

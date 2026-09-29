@@ -17,3 +17,4 @@ build
 tools/omero_import_metadata_probe/reports
 cisegmentation/roundtrip.py
 models
+publicdata/

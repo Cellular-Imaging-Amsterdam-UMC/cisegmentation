@@ -477,6 +477,7 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
         records: dict[str, list[dict[str, Any]]] = {}
         for request in model_pass.requests:
             request_settings = SegmentationSettings(**request.settings)
+            Path(str(_raw_path(stage_dir, model_pass, request, resource)) + ".points.sqlite").unlink(missing_ok=True)
             spec = get_model_spec(request.model_id)
             if streaming:
                 infos, tile_read_seconds = infer_streamed(
@@ -498,6 +499,10 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
                     image.scales,
                 )
                 labels_per_time.append(np.asarray(labels, dtype=np.uint32))
+                points = info.pop("_native_points", None)
+                if points is not None:
+                    from .point_localizations import append_raw
+                    append_raw(str(_raw_path(stage_dir, model_pass, request, resource)) + ".points.sqlite", time_index, points)
                 infos.append(dict(info))
             _atomic_save(
                 _raw_path(stage_dir, model_pass, request, resource),
@@ -1007,6 +1012,7 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
     overlay_path = Path(payload["overlay_path"])
     generated_names: list[str] = payload["generated_names"]
     final_names: list[str] = payload["final_names"]
+    (stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite").unlink(missing_ok=True)
     try:
         if any(_raw_path(stage_dir, model_pass, request, resource).is_dir()
                for model_pass in passes for request in model_pass.requests):
@@ -1114,6 +1120,12 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
                 request_by_kind.get("foci", [])
             ):
                 labels = consume("foci", time_index, index)
+                if settings.measurement_extensions_enabled():
+                    from .point_localizations import finalize_points
+                    mapping = {int(v): int(v) + next_id for v in np.unique(labels) if v}
+                    finalize_points(str(_raw_path(stage_dir, _model_pass, request, resource)) + ".points.sqlite",
+                                    stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite",
+                                    generated_names[len(time_channels)], time_index, mapping)
                 labels, next_id = engine._offset_labels(labels, next_id)
                 time_channels.append(labels)
                 time_labels.append(
@@ -1200,6 +1212,7 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
             "resource_path": resource.image_path,
             "provenance": provenance,
             "channel_labels": channel_labels,
+            "point_localizations": str(stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite"),
             "zarr_write_seconds": time.perf_counter() - write_started,
         }
     except Exception as exc:

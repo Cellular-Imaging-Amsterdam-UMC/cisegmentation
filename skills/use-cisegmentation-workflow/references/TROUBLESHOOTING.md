@@ -1,5 +1,18 @@
 # Troubleshooting
 
+Optional features require a measurement database. Missing or invalid NGFF spatial
+units block physical neighbor/tracking calculations; fix input calibration rather
+than interpreting pixel distances as micrometers. Missing time units are supported
+and explicitly produce frame-based timing. NULL Pearson/Manders results have a
+reason such as constant channels, insufficient finite pixels, negative intensities
+or zero signal. A one-voxel spot cannot have a meaningful Pearson correlation.
+
+A candidate graph or one object's polygon can exceed the live resource budget.
+Request more RAM or explicitly choose a smaller scientifically justified tracking
+distance; never silently drop candidates, vertices or whole objects. Temporary
+edge storage needs writable disk space. A geometry database is a separate artifact;
+polygon display requires a separate viewer integration.
+
 | Failure class | Check | User-actionable next step | Retry safety |
 | --- | --- | --- | --- |
 | Invalid selection | Input type, readable OME-Zarr stores, and supported image or HCS plate scope | Select a supported readable input. | Safe before submission. |

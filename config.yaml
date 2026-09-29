@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.6.1
+  tag: v0.6.2
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -98,7 +98,6 @@ parameters:
   mode: beginner
 - {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
 - {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
-- {name: include_original_data, type: checkbox, label: Include Original Data, description: Copy the original OME-Zarr to the output and add native labels only to that copy. The input remains unchanged. Disable to write a mergeable labels-only overlay., default: true, cli_tag: --include-original-data, cli_order: 42, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: existing_labels
   type: dropdown
   label: Existing Labels
@@ -174,3 +173,12 @@ parameters:
 - {name: spotiflow_min_distance, type: float, label: Spotiflow Minimum Distance (µm), description: Minimum detected-point separation in µm, converted using OME-Zarr XY pixel size., default: 1.0, minimum: 0.0, cli_tag: --spotiflow-min-distance, cli_order: 27, optional: true, section_id: advanced, mode: advanced}
 - {name: spotiflow_local_refinement, type: checkbox, label: Spotiflow Local Mask Refinement, description: Grow each Spotiflow point into a bounded mask using local signal and background. Supports 2D and forced slice-wise 2D., default: false, cli_tag: --spotiflow-local-refinement, cli_order: 28, optional: true, append_value: true, section_id: advanced, mode: advanced}
 - {name: benchmark, type: checkbox, label: Benchmark Gallery, description: Benchmark every model offered for each enabled segmentation step on first T and a centered maximum 1024x1024 ROI; write one rendered 2D XY RGB OME-Zarr gallery., default: false, cli_tag: --benchmark, cli_order: 44, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: spatial_measurements, type: checkbox, label: Spatial Measurements, description: Add nearest neighbors, radius counts, mask contacts and compartment spot counts. Requires calibrated spatial units and a measurement database., default: false, cli_tag: --spatial-measurements, cli_order: 60, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: spatial_radius_um, type: float, label: Neighbor Radius (µm), description: Radius for counting neighbors of the same label set and timepoint., default: 50.0, minimum: 0.001, cli_tag: --spatial-radius-um, cli_order: 61, optional: true, section_id: advanced, mode: advanced}
+- {name: colocalization, type: checkbox, label: Channel Colocalization, description: Per-object Pearson correlation and directional Manders coefficients with automatic Otsu thresholds. Requires a measurement database., default: false, cli_tag: --colocalization, cli_order: 62, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: colocalization_pairs, type: string, label: Colocalization Channel Pairs, description: Use all or one-based pairs such as 1:2 and 1:3 separated by commas., default: all, cli_tag: --colocalization-pairs, cli_order: 63, optional: true, section_id: advanced, mode: advanced}
+- {name: tracking, type: checkbox, label: Object Tracking, description: Track each field and label set independently across time. Requires calibrated spatial units and a measurement database. Spots work without cells or nuclei., default: false, cli_tag: --tracking, cli_order: 64, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: tracking_divisions, type: checkbox, label: Cell and Nucleus Divisions, description: Allow parent-daughter links for cells and nuclei when tracking is enabled. Spots and other objects always have one-to-one tracks; merging is disabled., default: true, cli_tag: --tracking-divisions, cli_order: 65, optional: true, append_value: true, section_id: advanced, mode: advanced}
+- {name: tracking_distance_um, type: float, label: Maximum Tracking Distance (µm), description: Maximum displacement for each assignment including missed-frame recovery., default: 20.0, minimum: 0.001, cli_tag: --tracking-distance-um, cli_order: 66, optional: true, section_id: advanced, mode: advanced}
+- {name: tracking_max_gap, type: integer, label: Maximum Missed Frames, description: Maximum absent frames between observations on one trajectory., default: 2, minimum: 0, cli_tag: --tracking-max-gap, cli_order: 67, optional: true, section_id: advanced, mode: advanced}
+- {name: export_geometry, type: checkbox, label: Export Geometry Database, description: Separate matching-format database of final mask polygons and native Spotiflow points linked to measurement objects. Requires a measurement database. Automatic viewer display is separate., default: false, cli_tag: --export-geometry, cli_order: 68, optional: true, append_value: true, section_id: advanced, mode: advanced}
