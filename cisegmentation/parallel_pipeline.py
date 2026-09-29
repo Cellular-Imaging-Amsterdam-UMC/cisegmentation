@@ -482,6 +482,7 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
                 infos, tile_read_seconds = infer_streamed(
                     image, spec, request_settings,
                     _raw_path(stage_dir, model_pass, request, resource), segment_czyx,
+                    allow_parallel=bool(payload.get("allow_tile_parallel", False)),
                     log=lambda message: print(message, flush=True),
                 )
                 read_seconds += tile_read_seconds
@@ -525,12 +526,35 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             ) / 1024**2
             process_cuda_mb = _process_gpu_memory_mb()
         peak_cuda_mb = max(torch_peak_cuda_mb, process_cuda_mb)
+        tile_stats = [
+            info.get("streaming", {})
+            for infos in records.values()
+            for info in infos
+        ]
+        # Child peaks are per worker. Their sum is a conservative estimate for
+        # the field scheduler, rather than the parent's CUDA allocator peak.
+        tile_cuda_estimate_mb = max(
+            (
+                float(stats.get("peak_worker_cuda_mb", 0))
+                * int(stats.get("peak_workers", 1))
+                for stats in tile_stats
+            ),
+            default=0.0,
+        )
+        peak_cuda_mb = max(peak_cuda_mb, tile_cuda_estimate_mb)
         try:
             import psutil
 
             rss_mb = psutil.Process().memory_info().rss / 1024**2
         except Exception:
             rss_mb = 0.0
+        rss_mb = max(
+            rss_mb,
+            max(
+                (float(stats.get("peak_parallel_rss_mb", 0)) for stats in tile_stats),
+                default=0.0,
+            ),
+        )
         return {
             "ok": True,
             "resource_path": resource.image_path,
@@ -540,6 +564,7 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             "peak_cuda_mb": peak_cuda_mb,
             "torch_peak_cuda_mb": torch_peak_cuda_mb,
             "process_cuda_mb": process_cuda_mb,
+            "tile_cuda_estimate_mb": tile_cuda_estimate_mb,
             "rss_mb": rss_mb,
             "device": device,
         }
@@ -750,6 +775,7 @@ def run_inference_passes(
             "resource": probe_resource,
             "model_pass": model_pass,
             "stage_dir": str(stage_dir),
+            "allow_tile_parallel": len(resources) == 1,
         }
         probe_retries = 0
         while True:
@@ -808,6 +834,7 @@ def run_inference_passes(
                     "resource": resource,
                     "model_pass": model_pass,
                     "stage_dir": str(stage_dir),
+                    "allow_tile_parallel": False,
                 }
                 for resource in pending
             ]

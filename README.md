@@ -44,7 +44,7 @@ root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.0`
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.1`
 image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
@@ -75,11 +75,20 @@ Slurm CPU/memory allocations, CPU affinity, container/cgroup limits, available
 host RAM, and the currently visible CUDA device. These checks run before every
 tile. They do not assume a fixed 4 CPU / 16 GB / 12 GB cluster profile.
 
-Streaming reads one region with a halo, runs the selected adapter, matches
-instance IDs against completed overlaps, and writes only the tile core. RAM or
-GPU pressure reduces pending tile sizes; catchable allocation errors retry the
-current tile at a smaller size. Pool allocation failures also reduce the number
-of field workers. Final cell/nucleus matching, label pyramids, and measurement
+Streaming profiles a representative tile including its halo, then sizes a pool
+from its measured peak RAM/GPU use and the available CPU allocation. The same
+safety margins used for plate fields apply to all model families. Workers infer
+bounded tiles; one parent matches instance IDs against completed overlaps and
+writes tile cores in their original order. The probe prediction is reused.
+When plate fields already run concurrently, each field keeps its tiles serial
+to avoid multiplying worker pools. **Maximum Inference Workers** also caps tile
+workers; `1` forces serial tiles and `0` selects the count automatically.
+
+Live RAM or GPU pressure reduces pending tile sizes. An allocation error first
+halves tile concurrency and retries only uncommitted cores; at one worker it
+splits the failing tile. Known operation-size limits also split the affected
+tile. Pool allocation failures reduce the number of field workers. Final
+cell/nucleus matching, label pyramids, and measurement
 database writing remain bounded. Measurement crops share a bounded decoded
 chunk cache, and database shards merge in batches of 1024 rows.
 
@@ -99,8 +108,12 @@ with a resource message. Exception recovery cannot guarantee recovery from an
 operating-system kill. An individual object whose measurement crop exceeds the
 bounded read budget also requires more resources or a smaller object.
 
-The log and OME-Zarr provenance record tile counts, allocation retries, pressure
-splits, smallest cores, overlap, and initial/minimum available resources.
+The log and OME-Zarr provenance record probe memory, selected/final tile workers,
+concurrency reductions, worker restarts, worker memory peaks, tile counts,
+allocation retries, pressure splits, smallest cores, overlap, and initial/minimum
+available resources. Per-worker temporary input/mask files keep large arrays out
+of multiprocessing messages; only a bounded batch is in flight and files are
+removed after committing each core.
 Scratch disk must hold raw labels, finalized labels, their pyramids, and database
 shards until the existing atomic publication finishes. Input stores are preserved.
 
@@ -117,6 +130,16 @@ For testing a smaller GPU on a larger physical card, its optional
 `--gpu-memory-mb 12288` sets `CISEGMENTATION_GPU_MEMORY_LIMIT_MB` and a real
 PyTorch per-process allocator cap inherited by inference workers. Production
 runs normally omit this override and discover their actual device/allocation.
+
+`tools/test_tile_parallelism.py` compares serial and automatic tile workers in
+separate processes on a large region, checks label pyramids, and records label
+differences and resource use for all five model families (including both
+Cellpose transformer checkpoints). Run it in the usual GPU environment:
+
+```bash
+python tools/test_tile_parallelism.py --input /data/large.ome.zarr \
+  --output /data/tile-worker-test --size 5120 --gpu-memory-mb 12288
+```
 
 For a direct local run:
 

@@ -313,11 +313,38 @@ def worker(case, config, output):
                 and zarr.open_group(str(raw_path), mode="r").attrs["complete"]
             )
             assert all(info["device"] == "cuda" for info in infos)
+            tile_stats = [info.get("streaming", {}) for info in infos]
+            child_allocated = int(
+                max(
+                    (
+                        stats.get("peak_worker_cuda_allocated_mb", 0)
+                        for stats in tile_stats
+                    ),
+                    default=0,
+                )
+                * 1024**2
+            )
+            child_reserved = int(
+                max(
+                    (
+                        stats.get("peak_worker_cuda_reserved_mb", 0)
+                        for stats in tile_stats
+                    ),
+                    default=0,
+                )
+                * 1024**2
+            )
             report.update(
                 infos=infos,
                 read_seconds=read_seconds,
-                peak_cuda_allocated=int(torch.cuda.max_memory_allocated()),
-                peak_cuda_reserved=int(torch.cuda.max_memory_reserved()),
+                peak_cuda_allocated=max(
+                    int(torch.cuda.max_memory_allocated()), child_allocated
+                ),
+                peak_cuda_reserved=max(
+                    int(torch.cuda.max_memory_reserved()), child_reserved
+                ),
+                tile_worker_peak_cuda_allocated=child_allocated,
+                tile_worker_peak_cuda_reserved=child_reserved,
             )
             report["tiled_peak_cuda_allocated"] = report["peak_cuda_allocated"]
             report["tiled_peak_cuda_reserved"] = report["peak_cuda_reserved"]
@@ -376,8 +403,12 @@ def worker(case, config, output):
                 if not report["tiled_objects"]:
                     report["quality_status"] = "inconclusive_no_detections"
             report["execution_status"] = "passed"
-            report["peak_cuda_allocated"] = int(torch.cuda.max_memory_allocated())
-            report["peak_cuda_reserved"] = int(torch.cuda.max_memory_reserved())
+            report["peak_cuda_allocated"] = max(
+                int(torch.cuda.max_memory_allocated()), child_allocated
+            )
+            report["peak_cuda_reserved"] = max(
+                int(torch.cuda.max_memory_reserved()), child_reserved
+            )
         report["monitor"] = monitor.report()
         print(
             f"CASE PASS: {case['id']}; quality={report['quality_status']}", flush=True
@@ -468,7 +499,10 @@ def summary_row(report, path):
     )
     info = (report.get("infos") or [{}])[0].get("streaming", {})
     row.update(
-        {key: info.get(key) for key in ("tiles", "oom_retries", "size_limit_retries", "pressure_splits")}
+        {
+            key: info.get(key)
+            for key in ("tiles", "oom_retries", "size_limit_retries", "pressure_splits")
+        }
     )
     return row
 

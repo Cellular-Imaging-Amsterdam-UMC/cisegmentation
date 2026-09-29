@@ -6,6 +6,8 @@ from pathlib import Path
 
 import yaml
 
+from cisegmentation import __version__
+
 ROOT = Path(__file__).parents[1]
 SKILLS = ROOT / "skills"
 NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -24,7 +26,7 @@ def test_agent_plugin_manifest_and_skills():
     assert manifest["$schema"] == (
         "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
     )
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.6.1"
     declared = manifest["extensions"]["nl.bioimaging.biomero"]["skills"]
     assert set(declared) == {path.name for path in SKILLS.iterdir() if path.is_dir()}
 
@@ -72,10 +74,11 @@ def test_versions_are_synchronized():
     manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.6.0"
-    assert 'version = "0.6.0"' in pyproject
-    assert (ROOT / "version.txt").read_text(encoding="utf-8").strip() == "v0.6.0"
-    assert config["docker_image"]["tag"] == "v0.6.0"
+    assert manifest["version"] == "0.6.1"
+    assert __version__ == manifest["version"]
+    assert 'version = "0.6.1"' in pyproject
+    assert (ROOT / "version.txt").read_text(encoding="utf-8").strip() == "v0.6.1"
+    assert config["docker_image"]["tag"] == "v0.6.1"
 
 
 def test_skill_content_is_platform_neutral():

@@ -126,10 +126,11 @@ def test_oom_splits_current_tile_without_repeating_completed_cores(tmp_path):
     assert len(np.unique(labels)) == 4
     assert infos[0]["streaming"]["oom_retries"] > 0
     assert infos[0]["streaming"]["smallest_core_xy"] < 128
+    assert infos[0]["streaming"]["pending_tiles"] == 0
 
 
 def test_live_memory_pressure_reduces_pending_tiles(tmp_path, monkeypatch):
-    from cisegmentation import streaming
+    from cisegmentation import streaming, streaming_tiles
 
     image = read_image(_source(tmp_path / "source.zarr"), lazy=True)
     state = {"calls": 0}
@@ -141,6 +142,7 @@ def test_live_memory_pressure_reduces_pending_tiles(tmp_path, monkeypatch):
         )
 
     monkeypatch.setattr(streaming, "snapshot", resources)
+    monkeypatch.setattr(streaming_tiles, "snapshot", resources)
     settings = SegmentationSettings(tile_size=128, tile_overlap=8, device="cpu")
     infos, _ = infer_streamed(
         image,

@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.6.0
+  tag: v0.6.1
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -144,7 +144,7 @@ parameters:
   section_id: advanced
   mode: advanced
 - {name: labels_log_info, type: checkbox, label: Labels Log Info, description: Calculate and log label counts, foreground fraction, and label size statistics. Disabled by default to avoid scanning large label arrays after segmentation., default: false, cli_tag: --labels-log-info, cli_order: 46, optional: true, append_value: true, section_id: advanced, mode: advanced}
-- {name: max_inference_workers, type: integer, label: Maximum Inference Workers, description: Upper limit for conservatively GPU-memory-sized inference processes. Automatic sizing includes NVIDIA process memory and keeps a larger VRAM reserve and worker safety margin. Use 0 for automatic., default: 0, minimum: 0, cli_tag: --max-inference-workers, cli_order: 47, optional: true, section_id: advanced, mode: advanced}
+- {name: max_inference_workers, type: integer, label: Maximum Inference Workers, description: Upper limit for memory-sized inference processes across plate fields or streamed tiles of a single image. Automatic sizing profiles a representative field or tile and respects CPU RAM and GPU budgets. Use 0 for automatic or 1 for serial inference., default: 0, minimum: 0, cli_tag: --max-inference-workers, cli_order: 47, optional: true, section_id: advanced, mode: advanced}
 - {name: max_measurement_workers, type: integer, label: Maximum Measurement Workers, description: Upper limit for CPU measurement processes. Use 0 for the available Slurm or physical CPU allocation., default: 0, minimum: 0, cli_tag: --max-measurement-workers, cli_order: 48, optional: true, section_id: advanced, mode: advanced}
 - {name: streaming_mode, type: dropdown, label: Streaming, description: Automatically stream large images or force streaming for a smaller test image., options: [{label: Automatic, value: auto}, {label: Always, value: on}], default: auto, cli_tag: --streaming-mode, cli_order: 49, optional: true, section_id: advanced, mode: advanced}
 - {name: tile_size, type: integer, label: Maximum Tile Size, description: Maximum XY core size. Available job memory and memory retries may reduce this while running., default: 1024, minimum: 64, cli_tag: --tile-size, cli_order: 50, optional: true, section_id: advanced, mode: advanced}

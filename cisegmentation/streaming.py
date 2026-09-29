@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .resources import MIB, memory_error, snapshot, tile_size_error
+from .resources import MIB, snapshot
 
 
 class ArrayView:
@@ -444,7 +444,9 @@ def _cleanup_memory():
         torch.cuda.empty_cache()
 
 
-def infer_streamed(image, spec, settings, path, segment, *, log=None):
+def infer_streamed(
+    image, spec, settings, path, segment, *, allow_parallel=True, log=None
+):
     """Write TZYX raw instances using adaptive tiles for every model adapter."""
     import zarr
 
@@ -504,120 +506,94 @@ def infer_streamed(image, spec, settings, path, segment, *, log=None):
             )
         )
         aggregate = None
-        processed = retries = size_retries = shrinks = 0
+        processed = 0
         smallest = settings.tile_size
         last_log = 0.0
         initial = snapshot().to_dict()
-        minimum_ram = initial["ram_available"]
-        minimum_gpu = initial["gpu_available"]
-        while queue:
-            core = queue.popleft()
-            extended = tuple(
-                slice(max(0, start - halo), min(size, end + halo))
-                for (start, end), halo, size in zip(
-                    core, halos, (z_size, y_size, x_size)
-                )
+        stats = {
+            "oom_retries": 0,
+            "size_limit_retries": 0,
+            "pressure_splits": 0,
+            "workers": 1,
+            "initial_workers": 1,
+            "peak_workers": 1,
+            "concurrency_reductions": 0,
+            "worker_restarts": 0,
+            "memory_waits": 0,
+            "spool_seconds": 0.0,
+            "peak_worker_rss_mb": 0.0,
+            "peak_worker_cuda_mb": 0.0,
+            "peak_worker_cuda_allocated_mb": 0.0,
+            "peak_worker_cuda_reserved_mb": 0.0,
+            "minimum_ram_available": initial["ram_available"],
+            "minimum_gpu_available": initial["gpu_available"],
+        }
+        from contextlib import closing
+
+        from .streaming_tiles import iter_tile_predictions
+
+        with closing(
+            iter_tile_predictions(
+                image,
+                t,
+                queue,
+                halos,
+                spec,
+                settings,
+                path,
+                segment,
+                stats,
+                allow_parallel=allow_parallel,
+                log=log,
             )
-            ext_shape = tuple(key.stop - key.start for key in extended)
-            resources = snapshot()
-            minimum_ram = min(minimum_ram, resources.ram_available)
-            if resources.gpu_total:
-                minimum_gpu = min(
-                    minimum_gpu or resources.gpu_available, resources.gpu_available
-                )
-            estimate = _estimate_bytes(ext_shape, spec, image.scales)
-            budget = resources.ram_available * 0.4
-            if resources.gpu_total and settings.device != "cpu":
-                budget = min(
-                    budget,
-                    max(
-                        0,
-                        resources.gpu_available
-                        - max(512 * MIB, resources.gpu_total * 0.15),
-                    )
-                    * 0.65,
-                )
-            children = _split(core)
-            if estimate > budget and children:
-                queue.extendleft(reversed(children))
-                shrinks += 1
-                continue
-            if estimate > budget:
-                raise MemoryError(
-                    f"{spec.id}: minimum tile plus overlap needs an estimated {estimate / MIB:.1f} MiB; "
-                    f"live safe budget is {budget / MIB:.1f} MiB. Reduce overlap or request more resources."
-                )
-            read_started = time.perf_counter()
-            try:
-                data = np.asarray(image.data[(t, slice(None), *extended)])
-                read_seconds += time.perf_counter() - read_started
-                predicted, info = segment(
-                    data, spec, settings, image.scales, bounded=True
-                )
-                predicted = np.asarray(predicted, dtype=np.uint32)
-                if predicted.shape != ext_shape:
-                    raise ValueError(
-                        f"Adapter returned {predicted.shape}, expected {ext_shape}"
-                    )
-            except Exception as exc:
-                size_limit = tile_size_error(exc)
-                if not memory_error(exc) and not size_limit:
-                    raise
-                data = None
-                exc.__traceback__ = None
-                _cleanup_memory()
-                if not children:
-                    if size_limit:
-                        raise RuntimeError(
-                            f"{spec.id}: minimum tile including overlap exceeds "
-                            f"the normalization size limit; reduce overlap: {exc}"
-                        ) from exc
-                    raise MemoryError(
-                        f"{spec.id} cannot fit a minimum tile including overlap; reduce overlap or use a larger allocation: {exc}"
-                    ) from exc
-                queue.extendleft(reversed(children))
-                size_retries += int(size_limit)
-                retries += int(not size_limit)
-                if log:
-                    reason = "operation size limit" if size_limit else "memory"
-                    log(f"Streaming {spec.id}: {reason} retry at {core}; splitting tile")
-                continue
-            old = np.asarray(labels[(t, *extended)])
-            covered = np.asarray(coverage[(t, *extended)])
-            relative = tuple(
-                slice(start - ext.start, end - ext.start)
-                for (start, end), ext in zip(core, extended)
-            )
-            stitched = _stitch(
+        ) as predictions:
+            for (
+                core,
+                extended,
                 predicted,
-                old,
-                covered,
-                relative,
-                parents,
-                settings.tile_match_threshold,
-            )
-            destination = (t, *(slice(start, end) for start, end in core))
-            labels[destination] = stitched
-            coverage[destination] = True
-            processed += 1
-            smallest = min(smallest, core[1][1] - core[1][0], core[2][1] - core[2][0])
-            if aggregate is None:
-                aggregate = dict(info)
-                aggregate["timings"] = {}
-                aggregate["model_cache_hits"] = aggregate["model_cache_misses"] = 0
-            for name, value in info.get("timings", {}).items():
-                aggregate["timings"][name] = aggregate["timings"].get(
-                    name, 0.0
-                ) + float(value)
-            for name in ("model_cache_hits", "model_cache_misses"):
-                aggregate[name] += int(info.get(name, 0))
-            now = time.perf_counter()
-            if log and now - last_log >= 15:
-                log(
-                    f"Streaming {spec.id}: {processed} tiles complete, {len(queue)} pending; RAM headroom {resources.ram_available / MIB:.0f} MiB, GPU {resources.gpu_available / MIB:.0f} MiB"
+                info,
+                tile_read_seconds,
+                resources,
+            ) in predictions:
+                read_seconds += tile_read_seconds
+                old = np.asarray(labels[(t, *extended)])
+                covered = np.asarray(coverage[(t, *extended)])
+                relative = tuple(
+                    slice(start - ext.start, end - ext.start)
+                    for (start, end), ext in zip(core, extended)
                 )
-                last_log = now
-            del data, predicted, old, covered, stitched
+                stitched = _stitch(
+                    predicted,
+                    old,
+                    covered,
+                    relative,
+                    parents,
+                    settings.tile_match_threshold,
+                )
+                destination = (t, *(slice(start, end) for start, end in core))
+                labels[destination] = stitched
+                coverage[destination] = True
+                processed += 1
+                smallest = min(
+                    smallest, core[1][1] - core[1][0], core[2][1] - core[2][0]
+                )
+                if aggregate is None:
+                    aggregate = dict(info)
+                    aggregate["timings"] = {}
+                    aggregate["model_cache_hits"] = aggregate["model_cache_misses"] = 0
+                for name, value in info.get("timings", {}).items():
+                    aggregate["timings"][name] = aggregate["timings"].get(
+                        name, 0.0
+                    ) + float(value)
+                for name in ("model_cache_hits", "model_cache_misses"):
+                    aggregate[name] += int(info.get(name, 0))
+                now = time.perf_counter()
+                if log and now - last_log >= 15:
+                    log(
+                        f"Streaming {spec.id}: {processed} tiles complete, {stats.get('pending_tiles', len(queue) - processed)} pending; RAM headroom {resources.ram_available / MIB:.0f} MiB, GPU {resources.gpu_available / MIB:.0f} MiB"
+                    )
+                    last_log = now
+                del predicted, old, covered, stitched
         # A new ID is allocated only for an instance present in a written core.
         # IDs are already dense, so another full-image read/write is unnecessary.
         aggregate = aggregate or {
@@ -631,15 +607,10 @@ def infer_streamed(image, spec, settings, path, segment, *, log=None):
                 "runtime_seconds": time.perf_counter() - started,
                 "streaming": {
                     "tiles": processed,
-                    "oom_retries": retries,
-                    "size_limit_retries": size_retries,
-                    "pressure_splits": shrinks,
+                    **stats,
                     "smallest_core_xy": smallest,
                     "overlap_zyx": list(halos),
-                    "workers": 1,
                     "initial_resources": initial,
-                    "minimum_ram_available": minimum_ram,
-                    "minimum_gpu_available": minimum_gpu,
                 },
             }
         )
