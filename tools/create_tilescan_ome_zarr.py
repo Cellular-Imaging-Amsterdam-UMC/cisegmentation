@@ -76,7 +76,10 @@ def mean_downsample(block):
 
 def create_tilescan(source_path, output_path, *, height=40000, width=40000,
                     seed=20260928, chunk_size=512, pyramid_min_size=512,
-                    pixel_size_um=None):
+                    pixel_size_um=None, transforms=None, region_renderer=None,
+                    extra_metadata=None, channel_label='Cells',
+                    label_renderer=None, label_name='labels_nuclei_reference',
+                    label_max_id=None):
     started = time.perf_counter()
     source_path, output_path = Path(source_path), Path(output_path)
     if min(height, width, chunk_size, pyramid_min_size) < 1:
@@ -97,16 +100,24 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
         raise ValueError('Square source tiles are required for 90-degree rotations')
     rows, columns = math.ceil(height / tile.shape[0]), math.ceil(width / tile.shape[1])
     rng = np.random.default_rng(seed)
-    transforms = np.stack([
-        rng.integers(0, 4, (rows, columns)),
-        rng.integers(0, 2, (rows, columns)),
-        rng.integers(0, 2, (rows, columns)),
-    ], axis=-1)
+    if transforms is None:
+        transforms = np.stack([
+            rng.integers(0, 4, (rows, columns)),
+            rng.integers(0, 2, (rows, columns)),
+            rng.integers(0, 2, (rows, columns)),
+        ], axis=-1)
+    transforms = np.asarray(transforms)
+    if transforms.shape != (rows, columns, 3):
+        raise ValueError('Transform grid must match the output tile grid')
+    renderer = region_renderer or render_region
+    if label_renderer is not None and (label_max_id is None or
+            not 0 <= label_max_id <= np.iinfo(np.uint32).max):
+        raise ValueError('Reference label maximum must fit uint32')
     scales = {axis: 1.0 for axis in 'tczyx'}
     if pixel_size_um is not None:
         scales['y'] = scales['x'] = pixel_size_um
     source = ImageData(tile[None,None,None], tuple('tczyx'), scales,
-                       {'omero': {'channels': [{'label':'Cells', 'color':'FFFFFF'}]}},
+                       {'omero': {'channels': [{'label':channel_label, 'color':'FFFFFF'}]}},
                        ImageResource(source_path), str(tile.dtype))
     metadata_result = LabelResult(np.empty((0,), dtype=np.uint32), source,
                                   'synthetic-tilescan', 'image')
@@ -145,6 +156,31 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
         'edge_policy':'crop to exact target size', 'pyramid_filter':'2x2 mean; integer levels rounded',
         'pixel_size_um':pixel_size_um, 'complete':False,
     }
+    if extra_metadata:
+        root.attrs['synthetic_tilescan'] = {**dict(root.attrs['synthetic_tilescan']),
+                                           'seam_repair': extra_metadata}
+    label_arrays = []
+    if label_renderer is not None:
+        labels = root.require_group('labels')
+        labels.attrs['labels'] = [label_name]
+        group = labels.require_group(label_name)
+        group.attrs['multiscales'] = [{'version':'0.4', 'name':label_name,
+                                      'axes':axes, 'datasets':datasets}]
+        group.attrs['image-label'] = {'version':'0.4', 'source':{'image':'../../'}}
+        group.attrs['omero'] = {'version':'0.4', 'name':label_name,
+            'channels':[{'label':label_name, 'color':'FFFFFF', 'active':True,
+                'window':{'min':0, 'max':max(1,label_max_id), 'start':0,
+                          'end':max(1,label_max_id)}}],
+            'rdefs':{'defaultT':0, 'defaultZ':0, 'model':'greyscale'}}
+        group.attrs['synthetic_reference'] = {
+            'description':'Source segmentation masks and copied donor masks; not manually annotated ground truth',
+            'pyramid_filter':'nearest-neighbour; instance IDs unchanged'}
+        for index, array in enumerate(arrays):
+            labels_array = group.create_dataset(str(index), shape=array.shape,
+                dtype=np.uint32, chunks=array.chunks, compressor=compressor,
+                dimension_separator='/')
+            labels_array.attrs['_ARRAY_DIMENSIONS'] = list('tczyx')
+            label_arrays.append(labels_array)
     for index, array in enumerate(arrays):
         h, w = array.shape[-2:]
         for y in range(0, h, chunk_size):
@@ -152,11 +188,24 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
             for x in range(0, w, chunk_size):
                 bw = min(chunk_size, w-x)
                 if index == 0:
-                    block = render_region(tile, transforms, y, x, bh, bw)
+                    block = renderer(tile, transforms, y, x, bh, bw)
                 else:
                     previous = arrays[index-1]
                     block = mean_downsample(previous[0,0,0,y*2:min((y+bh)*2,previous.shape[-2]),x*2:min((x+bw)*2,previous.shape[-1])])
                 array[0,0,0,y:y+bh,x:x+bw] = block
+                if label_arrays:
+                    if index == 0:
+                        label_block = label_renderer(y, x, bh, bw)
+                        if label_block.shape != (bh,bw) or label_block.dtype != np.dtype('uint32'):
+                            raise ValueError('Reference renderer must return a uint32 array matching the chunk')
+                        if int(label_block.max(initial=0)) > label_max_id:
+                            raise ValueError('Rendered reference IDs exceed the declared maximum')
+                    else:
+                        previous_labels = label_arrays[index-1]
+                        label_block = previous_labels[0,0,0,
+                            y*2:min((y+bh)*2,previous_labels.shape[-2]):2,
+                            x*2:min((x+bw)*2,previous_labels.shape[-1]):2]
+                    label_arrays[index][0,0,0,y:y+bh,x:x+bw] = label_block
             if y == 0 or (y // chunk_size + 1) % 10 == 0 or y+bh == h:
                 print(json.dumps({'level':index, 'shape_yx':[h,w], 'rows_done':y+bh,
                                   'elapsed_seconds':round(time.perf_counter()-started,1)}), flush=True)
@@ -177,7 +226,10 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     points += [(int(check_rng.integers(height)), int(check_rng.integers(width))) for _ in range(16)]
     for y, x in points:
         bh, bw = min(23,height-y), min(29,width-x)
-        np.testing.assert_array_equal(arrays[0][0,0,0,y:y+bh,x:x+bw], render_region(tile,transforms,y,x,bh,bw))
+        np.testing.assert_array_equal(arrays[0][0,0,0,y:y+bh,x:x+bw], renderer(tile,transforms,y,x,bh,bw))
+        if label_arrays:
+            np.testing.assert_array_equal(label_arrays[0][0,0,0,y:y+bh,x:x+bw],
+                                          label_renderer(y,x,bh,bw))
     for index in range(1, len(arrays)):
         previous, current = arrays[index-1], arrays[index]
         for y, x in [(0,0),(max(0,current.shape[-2]-17),max(0,current.shape[-1]-19))]:
