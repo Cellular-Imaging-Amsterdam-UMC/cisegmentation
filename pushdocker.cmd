@@ -80,30 +80,18 @@ if "%SKIP_BUILD%"=="0" (
         docker tag "%IMAGE_NAME%:latest" "%IMAGE_NAME%:%VERSION%"
         if errorlevel 1 goto :build_failed
     )
-    call :run_or_echo docker build -f Dockerfile.gradio --build-arg BASE_IMAGE="%IMAGE_NAME%:%VERSION%" -t "%IMAGE_NAME%:%VERSION%-gradio" -t "%IMAGE_NAME%:latest-gradio" .
-    if errorlevel 1 goto :build_failed
-    call :run_or_echo docker build -f Dockerfile.jupyter --build-arg BASE_IMAGE="%IMAGE_NAME%:%VERSION%" -t "%IMAGE_NAME%:%VERSION%-jupyter" -t "%IMAGE_NAME%:latest-jupyter" .
-    if errorlevel 1 goto :build_failed
 )
 
 call :tag_and_push "%IMAGE_NAME%:%VERSION%" "%FULL_IMAGE%:%VERSION%"
 if errorlevel 1 goto :push_failed
 call :tag_and_push "%IMAGE_NAME%:latest" "%FULL_IMAGE%:latest"
 if errorlevel 1 goto :push_failed
-call :tag_and_push "%IMAGE_NAME%:%VERSION%-gradio" "%FULL_IMAGE%:%VERSION%-gradio"
-if errorlevel 1 goto :push_failed
-call :tag_and_push "%IMAGE_NAME%:latest-gradio" "%FULL_IMAGE%:latest-gradio"
-if errorlevel 1 goto :push_failed
-call :tag_and_push "%IMAGE_NAME%:%VERSION%-jupyter" "%FULL_IMAGE%:%VERSION%-jupyter"
-if errorlevel 1 goto :push_failed
-call :tag_and_push "%IMAGE_NAME%:latest-jupyter" "%FULL_IMAGE%:latest-jupyter"
-if errorlevel 1 goto :push_failed
 
 popd >nul
 if "%DRY_RUN%"=="1" (
-    echo Dry run completed for all Docker variants of %FULL_IMAGE% version %VERSION%.
+    echo Dry run completed for the workflow image %FULL_IMAGE% version %VERSION%.
 ) else (
-    echo Pushed all Docker variants for %FULL_IMAGE% version %VERSION%.
+    echo Pushed the workflow image %FULL_IMAGE% version %VERSION%.
 )
 endlocal & exit /b 0
 

@@ -12,7 +12,15 @@ source is retained. Legacy `--include-original-data false` and
 Enable individual features with `--spatial-measurements true`,
 `--colocalization true`, `--tracking true` or `--export-geometry true`.
 All require `--measurements-database duckdb` or `sqlite`. Spatial/tracking features
-also require positive NGFF spatial calibration with units. Missing physical time
+also require positive spatial calibration with units. Calibrated NGFF axes take
+priority; missing or unusable axes fall back to `PhysicalSizeX/Y/Z` from the
+matching image in the embedded `OME/METADATA.ome.xml`. OME-XML length units are
+converted to micrometers. HCS fields are matched through their plate/well and
+`WellSample`/`ImageRef`, rather than using the first XML image for every field.
+All input fields are checked using metadata only before any segmentation starts.
+If neither source supplies usable calibration, the error identifies the input
+and the required axes. X/Y are required for 2D; X/Y/Z for 3D. The input metadata
+is not rewritten by this fallback. Missing physical time
 calibration uses frames; a time scale without units is not assumed to be seconds.
 Default physical controls are a 50 µm neighbor radius, 20 µm tracking displacement
 and two missed frames. All channel selectors are one-based.

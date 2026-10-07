@@ -1,7 +1,7 @@
 """Opt-in schema-v5 extensions, computed after final field ID assignment.
 
-All legacy tables/views are immutable. Spatial distances use validated NGFF
-calibration; geometry uses pixel-centre coordinates and retains transforms.
+All legacy tables/views are immutable. Spatial distances use validated NGFF or
+OME-XML calibration; geometry uses pixel-centre coordinates and retains transforms.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from uuid import UUID, uuid5
 import numpy as np
 from scipy.spatial import cKDTree
 
+from .calibration import LENGTH_FACTORS_UM, effective_transform
 from .ome_zarr_io import read_image, read_native_label
 from .resources import MIB, snapshot
 
@@ -106,17 +107,7 @@ def calibration(image):
     axes = multiscale.get("axes") or []
     names = [a.get("name") if isinstance(a, dict) else a for a in axes]
     units = {a["name"]: a.get("unit") for a in axes if isinstance(a, dict)}
-    factors = {
-        "micrometer": 1.0,
-        "micrometre": 1.0,
-        "um": 1.0,
-        "µm": 1.0,
-        "nanometer": 0.001,
-        "millimeter": 1000.0,
-        "meter": 1e6,
-        "centimeter": 1e4,
-        "picometer": 1e-6,
-    }
+    factors = LENGTH_FACTORS_UM
     time_factors = {
         "second": 1.0,
         "millisecond": 0.001,
@@ -126,30 +117,7 @@ def calibration(image):
         "hour": 3600.0,
         "day": 86400.0,
     }
-    scale, offset = dict(image.scales), {a: 0.0 for a in names}
-    transforms = (multiscale.get("datasets") or [{}])[0].get(
-        "coordinateTransformations"
-    ) or []
-    transforms = transforms + (multiscale.get("coordinateTransformations") or [])
-    if transforms and names:
-        scale, offset = {a: 1.0 for a in names}, {a: 0.0 for a in names}
-        for transform in transforms:
-            kind = transform.get("type")
-            values = transform.get(kind)
-            if (
-                kind not in {"scale", "translation"}
-                or not values
-                or len(values) != len(names)
-            ):
-                raise ValueError(
-                    "Optional measurements require supported NGFF scale/translation transforms"
-                )
-            for a, value in zip(names, values):
-                if kind == "scale":
-                    scale[a] *= float(value)
-                    offset[a] *= float(value)
-                else:
-                    offset[a] += float(value)
+    scale, offset = effective_transform(multiscale, names or image.axes)
     needed = ["y", "x"] + (["z"] if image.data.shape[2] > 1 else [])
     valid = all(
         units.get(a) in factors
@@ -169,6 +137,20 @@ def calibration(image):
     dt = scale.get("t", 0) * time_factors.get(units.get("t"), 0)
     seconds = dt if math.isfinite(dt) and dt > 0 else None
     return valid, spatial_scale, translation, seconds, multiscale
+
+
+def require_spatial_calibration(image):
+    result = calibration(image)
+    if not result[0]:
+        needed = "X/Y/Z" if image.data.shape[2] > 1 else "X/Y"
+        resource = image.resource
+        raise ValueError(
+            f"{resource.store_path}/{resource.image_path}: spatial/tracking measurements "
+            f"require positive calibrated {needed} pixel sizes with physical units; "
+            "no usable calibration was found in NGFF metadata or embedded OME-XML "
+            "(OME/METADATA.ome.xml)"
+        )
+    return result
 
 
 def channel_pairs(selection, count):
@@ -435,11 +417,11 @@ def write_extensions(
             image.data.cache = ChunkCache(
                 min(64 * MIB, max(MIB, snapshot().ram_available // 32))
             )
-            valid, scales, translation, seconds, metadata = calibration(image)
-            if (settings.spatial_measurements or settings.tracking) and not valid:
-                raise ValueError(
-                    f"{resource_path or resource.name}: spatial/tracking measurements require positive calibrated spatial axes with NGFF units"
-                )
+            valid, scales, translation, seconds, metadata = (
+                require_spatial_calibration(image)
+                if settings.spatial_measurements or settings.tracking
+                else calibration(image)
+            )
             time_unit = "second" if seconds else "frame"
             frame_row = (
                 image_id,

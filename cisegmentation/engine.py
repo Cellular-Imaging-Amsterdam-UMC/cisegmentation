@@ -1031,6 +1031,28 @@ def run_workflow(
         raise FileNotFoundError(f"No top-level NGFF .zarr inputs found in {input_dir}")
     outputs: list[Path] = []
     emit(log, f"Discovered {len(stores)} top-level OME-Zarr input(s).")
+    if settings.spatial_measurements or settings.tracking:
+        from .measurement_extensions import require_spatial_calibration
+
+        emit(
+            log, "Checking spatial calibration for all input fields before segmentation."
+        )
+        checked = fallback_fields = 0
+        for store in stores:
+            for resource in enumerate_resources(store):
+                image = read_image(resource, lazy=True)
+                try:
+                    require_spatial_calibration(image)
+                    checked += 1
+                    if image.calibration_sources:
+                        fallback_fields += 1
+                finally:
+                    image.data.array.store.close()
+        emit(
+            log,
+            f"Spatial calibration verified: {checked} field(s), "
+            f"OME-XML fallback used for {fallback_fields} field(s).",
+        )
     startup_remaining = float(startup_seconds)
     if settings.benchmark:
         first_resource = enumerate_resources(stores[0])[0]

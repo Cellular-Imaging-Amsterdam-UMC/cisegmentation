@@ -197,7 +197,8 @@ pushdocker.cmd --skip-build --dry-run
 ```
 
 Build and publish the version from `version.txt` only after reviewing the dry
-run:
+run. Publication includes only the headless workflow image (version and
+`latest` tags); optional Gradio and Jupyter images are no longer published:
 
 ```bat
 pushdocker.cmd --yes
@@ -343,14 +344,17 @@ location. Runtime jobs therefore do not need network access.
 ## Docker images
 
 ```text
-builddocker.cmd             headless Bilayers/BIOMERO image
-builddocker_gradio.cmd      headless + generated Gradio image
-builddocker_jupyter.cmd     headless + generated JupyterLab image
+builddocker.cmd             headless Bilayers/BIOMERO workflow image
 ```
 
-The images are tagged `w_cisegmentation:<version>`,
-`w_cisegmentation:<version>-gradio`, and
-`w_cisegmentation:<version>-jupyter`.
+Default builds and CI build only the workflow image, tagged
+`w_cisegmentation:<version>` and `w_cisegmentation:latest`. Model and runtime
+cache images are internal dependencies of this build.
+
+Optional Gradio and Jupyter Dockerfiles, requirements, and manual build scripts
+are isolated in [bilayers_extra](bilayers_extra/README.md). They reuse an already
+built workflow image and are excluded from default builds, CI builds, and Docker
+Hub publication.
 
 ## OMERO round trip
 

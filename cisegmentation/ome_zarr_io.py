@@ -36,6 +36,7 @@ class ImageData:
     attrs: dict[str, Any]
     resource: ImageResource
     source_dtype: str
+    calibration_sources: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -205,19 +206,6 @@ def _axis_names(multiscale: dict, ndim: int) -> tuple[str, ...]:
     return defaults[ndim]
 
 
-def _scale_map(multiscale: dict, axes: tuple[str, ...]) -> dict[str, float]:
-    datasets = multiscale.get("datasets") or []
-    transforms = (
-        (datasets[0].get("coordinateTransformations") or []) if datasets else []
-    )
-    values = next(
-        (item.get("scale") for item in transforms if item.get("type") == "scale"), None
-    )
-    if not values or len(values) != len(axes):
-        return {}
-    return {axis: float(value) for axis, value in zip(axes, values)}
-
-
 def _to_tczyx(data: np.ndarray, axes: tuple[str, ...]) -> np.ndarray:
     known = set("tczyx")
     if any(axis not in known for axis in axes):
@@ -256,7 +244,11 @@ def read_image(resource: ImageResource, *, lazy: bool = False) -> ImageData:
     array = group[dataset_path]
     source_dtype = str(array.dtype)
     axes = _axis_names(multiscale, array.ndim)
-    scales = _scale_map(multiscale, axes)
+    from .calibration import resolve_spatial_calibration
+
+    attrs, scales, calibration_sources = resolve_spatial_calibration(
+        resource, attrs, axes, array.shape
+    )
     if lazy:
         from .streaming import ArrayView
 
@@ -270,6 +262,7 @@ def read_image(resource: ImageResource, *, lazy: bool = False) -> ImageData:
         attrs,
         resource,
         source_dtype,
+        calibration_sources,
     )
 
 

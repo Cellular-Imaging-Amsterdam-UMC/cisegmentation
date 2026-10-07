@@ -18,3 +18,4 @@ tools/omero_import_metadata_probe/reports
 cisegmentation/roundtrip.py
 models
 publicdata/
+bilayers_extra/
