@@ -3,6 +3,10 @@ FROM ${RUNTIME_CACHE_IMAGE}
 
 WORKDIR /app
 COPY requirements_cellpose_transformer.txt /app/
+# Install the small CPU scheduling dependency even when reusing an older
+# inference runtime cache, so spawned workers can limit nested BLAS threads.
+COPY requirements.txt /app/requirements.txt
+RUN python -m pip install 'threadpoolctl>=3.5,<4'
 # Keep checkpoint architecture dependencies available when reusing a previously
 # published inference runtime as RUNTIME_CACHE_IMAGE.
 ARG INSTALL_CHECKPOINT_DEPENDENCIES=true

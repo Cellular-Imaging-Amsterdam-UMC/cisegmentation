@@ -1,7 +1,8 @@
 """Exact pixel-edge polygons and portable WKB, without spatial extensions.
 
 Pixels have integer centre coordinates; their edges lie at half integers.
-Boundary segments spill to SQLite. A single object's outlines are assembled
+Boundary segments stay in bounded RAM and spill to SQLite when necessary.
+A single object's outlines are assembled
 only after checking their size against live RAM. Masks remain authoritative.
 """
 
@@ -10,12 +11,11 @@ from __future__ import annotations
 import sqlite3
 import struct
 from collections import defaultdict
-from contextlib import closing
 from itertools import pairwise
 
 import numpy as np
 
-from .resources import snapshot
+from .resources import ResourceMonitor
 
 
 def point_wkb(x, y, z=None):
@@ -127,18 +127,28 @@ def trace_rings(edges):
 
 
 def mask_polygons(
-    array, label, z, bbox, spool_path, block_size=512, *, return_bounds=False
+    array,
+    label,
+    z,
+    bbox,
+    spool_path,
+    block_size=512,
+    *,
+    return_bounds=False,
+    monitor=None,
+    edge_memory_bytes=None,
 ):
     """Extract one final label plane using bounded crops plus a one-pixel halo."""
     y0, x0, y1, x1 = map(int, bbox)
-    with closing(sqlite3.connect(spool_path)) as spool:
-        spool.execute("DROP TABLE IF EXISTS edges")
-        spool.execute(
-            "CREATE TABLE edges (x1 INTEGER,y1 INTEGER,x2 INTEGER,y2 INTEGER)"
-        )
+    monitor = monitor or ResourceMonitor()
+    budget = min(16 * 1024**2, monitor.get().ram_available // 64)
+    if edge_memory_bytes is not None:
+        budget = min(budget, edge_memory_bytes)
+    edges, spool, count = [], None, 0
+    try:
         for y in range(y0, y1, block_size):
             for x in range(x0, x1, block_size):
-                if snapshot().ram_available < 16 * 1024**2:
+                if monitor.get().ram_available < 16 * 1024**2:
                     raise MemoryError("Insufficient live RAM for polygon extraction")
                 end_y, end_x = min(y1, y + block_size), min(x1, x + block_size)
                 sy, sx = max(0, y - 1), max(0, x - 1)
@@ -174,18 +184,30 @@ def mask_polygons(
                         rows = zip(xx + 1, yy + 1, xx - 1, yy + 1)
                     else:
                         rows = zip(xx - 1, yy + 1, xx - 1, yy - 1)
-                    spool.executemany(
-                        "INSERT INTO edges VALUES (?,?,?,?)",
-                        (tuple(map(int, r)) for r in rows),
-                    )
-        count = spool.execute("SELECT count(*) FROM edges").fetchone()[0]
+                    rows = [tuple(map(int, r)) for r in rows]
+                    count += len(rows)
+                    if spool is None and count * 320 > budget:
+                        spool = sqlite3.connect(spool_path)
+                        # Scratch only; scientific results live in the parent DB.
+                        spool.execute("PRAGMA journal_mode=OFF")
+                        spool.execute("PRAGMA synchronous=OFF")
+                        spool.execute("DROP TABLE IF EXISTS edges")
+                        spool.execute(
+                            "CREATE TABLE edges (x1 INTEGER,y1 INTEGER,x2 INTEGER,y2 INTEGER)"
+                        )
+                        spool.executemany("INSERT INTO edges VALUES (?,?,?,?)", edges)
+                        edges.clear()
+                    if spool is None:
+                        edges.extend(rows)
+                    else:
+                        spool.executemany("INSERT INTO edges VALUES (?,?,?,?)", rows)
         if not count:
             return None
-        if count * 320 > snapshot().ram_available // 4:
+        if count * 320 > monitor.get().ram_available // 4:
             raise MemoryError(
                 "One object's polygon vertices exceed live RAM budget; request more RAM (raster labels are preserved)"
             )
-        rings = trace_rings(spool.execute("SELECT * FROM edges"))
+        rings = trace_rings(spool.execute("SELECT * FROM edges") if spool else edges)
         data, kind = polygon_wkb(rings)
         result = (data, kind, sum(_area(r) for r in rings))
         if return_bounds:
@@ -198,3 +220,6 @@ def mask_polygons(
                 ),
             )
         return result
+    finally:
+        if spool is not None:
+            spool.close()

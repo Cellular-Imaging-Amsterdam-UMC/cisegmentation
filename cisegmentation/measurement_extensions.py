@@ -21,7 +21,7 @@ from scipy.spatial import cKDTree
 
 from .calibration import LENGTH_FACTORS_UM, effective_transform
 from .ome_zarr_io import read_image, read_native_label
-from .resources import MIB, snapshot
+from .resources import MIB, ResourceMonitor, snapshot
 
 EXTENSION_VERSION = 1
 _SCHEMA = """
@@ -207,12 +207,13 @@ def thresholds(image, t, channels):
     return result
 
 
-def object_blocks(bbox, shape):
+def object_blocks(bbox, shape, monitor=None):
     z0, y0, x0, z1, y1, x1 = map(int, bbox)
-    budget = max(1, snapshot().ram_available // 64)
+    monitor = monitor or ResourceMonitor()
+    budget = max(1, monitor.get().ram_available // 64)
     step = max(16, min(512, int(math.sqrt(budget / 128))))
     for z, y, x in product(range(z0, z1), range(y0, y1, step), range(x0, x1, step)):
-        if snapshot().ram_available < MIB:
+        if monitor.get().ram_available < MIB:
             raise MemoryError("Insufficient live RAM for optional object measurements")
         yield (
             slice(z, z + 1),
@@ -221,12 +222,12 @@ def object_blocks(bbox, shape):
         )
 
 
-def colocalization_values(image, labels, t, label, bbox, pair, limits):
+def colocalization_values(image, labels, t, label, bbox, pair, limits, *, monitor=None):
     sums = np.zeros(7, dtype=np.float64)
     n, negative = 0, False
     a, b = pair
     ta, tb = limits[a][0], limits[b][0]
-    for key in object_blocks(bbox, labels.shape):
+    for key in object_blocks(bbox, labels.shape, monitor):
         mask = np.asarray(labels[key]) == label
         aa = np.asarray(image.data[(t, a, *key)], dtype=np.float64)[mask]
         bb = np.asarray(image.data[(t, b, *key)], dtype=np.float64)[mask]
@@ -349,7 +350,8 @@ def write_extensions(
     """Write optional features to staged measurements and a staged geometry DB."""
     if not settings.measurement_extensions_enabled():
         return {"enabled": False}, None
-    from .geometry import mask_polygons, point_wkb
+    from .extension_workers import ExtensionWorkers
+    from .geometry import point_wkb
     from .tracking import link_observations
 
     finalization = finalization or {}
@@ -361,6 +363,7 @@ def write_extensions(
         "geometry.duckdb" if database_format == "duckdb" else "geometry.sqlite"
     )
     geometry_id, track_offset, lineage_offset = 0, 0, 0
+    workers = ExtensionWorkers(settings.max_measurement_workers)
     try:
         db.execute("BEGIN TRANSACTION")
         for statement in _SCHEMA.split(";"):
@@ -514,8 +517,28 @@ def write_extensions(
                         )
                         objects = []
                         plane = label_array[t, 0]
-                        for row in data:
+                        computed = workers.objects(
+                            image,
+                            plane,
+                            data,
+                            resource=resource,
+                            store=store,
+                            name=name,
+                            t=t,
+                            pairs=pairs,
+                            limits=limits_by_t.get(t, {}),
+                            geometry=geo is not None,
+                            locations_only=locations_only,
+                            spool=stage_dir / "polygon-edges.sqlite",
+                        )
+                        for row, (computed_id, coloc, polygons) in zip(
+                            data, computed, strict=True
+                        ):
                             oid, value, z, y, x, size, *bbox = row
+                            if computed_id != oid:
+                                raise RuntimeError(
+                                    "Optional measurement worker changed object order"
+                                )
                             pixel = np.asarray(
                                 native.get(int(value), (z or 0, y, x)), dtype=float
                             )
@@ -552,22 +575,14 @@ def write_extensions(
                                     # Native point labels have NULL legacy boxes.
                                     anchor = (int(z or 0), int(y), int(x))
                                     bbox = [*anchor, *(v + 1 for v in anchor)]
-                                for pair in pairs:
+                                for pair, values in zip(pairs, coloc, strict=True):
                                     sink.add(
                                         "colocalization_measurements",
                                         (
                                             oid,
                                             channels[pair[0]][0],
                                             channels[pair[1]][0],
-                                            *colocalization_values(
-                                                image,
-                                                plane,
-                                                t,
-                                                value,
-                                                bbox,
-                                                pair,
-                                                limits_by_t[t],
-                                            ),
+                                            *values,
                                         ),
                                     )
                             if geo is not None:
@@ -616,18 +631,7 @@ def write_extensions(
                                         ),
                                     )
                                 else:
-                                    z0, y0, x0, z1, y1, x1 = map(int, bbox)
-                                    for zz in range(z0, z1):
-                                        result = mask_polygons(
-                                            plane,
-                                            value,
-                                            zz,
-                                            (y0, x0, y1, x1),
-                                            stage_dir / "polygon-edges.sqlite",
-                                            return_bounds=True,
-                                        )
-                                        if result is None:
-                                            continue
+                                    for zz, result in polygons:
                                         wkb, kind, area, bounds = result
                                         geometry_id += 1
                                         geo_sink.add(
@@ -774,6 +778,7 @@ def write_extensions(
             "extension_version": EXTENSION_VERSION,
             "rows": dict(sink.counts),
             "geometry_rows": geometry_id,
+            "cpu_workers": workers.used_workers,
             "runtime_seconds": time.perf_counter() - started,
         }
         if log:
@@ -791,6 +796,7 @@ def write_extensions(
             db.execute("ROLLBACK")
         raise
     finally:
+        workers.close()
         db.close()
         if geo is not None:
             geo.close()

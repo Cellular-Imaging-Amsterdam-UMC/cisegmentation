@@ -4,6 +4,33 @@ These additions are disabled by default. Base measurement schema 5, views,
 frame-local label values, object IDs and original CLI flags retain their behavior.
 Extension schema 1 is recorded separately in `measurement_extensions`.
 
+Geometry and colocalization are computed in ordered batches of 64 objects in
+spawned CPU processes, including for a single image store. The parent remains
+the only database writer, so SQLite/DuckDB locks and geometry/object IDs retain
+their serial behavior. Spatial neighbors and tracking retain their field-level
+calculations. Frames with fewer than 256 objects use the serial path.
+
+The worker limit respects Slurm CPU allocation, affinity/container limits,
+physical cores, available RAM and `--max-measurement-workers`; one CPU is reserved
+for the parent. At most two batches per worker are queued, and each worker uses
+private scratch. Nested BLAS threads are limited to one. Polygon edges stay in
+bounded memory and spill to SQLite only for larger boundaries. Headroom checks
+refresh every 250 ms instead of scanning the process tree for every object.
+
+On the local i5-11600K (6 physical cores, 12 logical CPUs), reusing one completed
+PicoScreens image with 1,036 objects and 1,036 geometries reduced optional
+measurements from 70.4 seconds to 3.6–4.2 seconds with a four-CPU allocation
+(three workers). This comparison excludes inference and uses the same local
+SSD fixture; the previous HDD job averaged 107.6 seconds. Every stored value,
+including geometry WKB, matched the old implementation. This single-image result
+does not establish full-plate runtime or an adequate Slurm time limit.
+
+Reproduce on copies of completed inputs/results using
+`tools/benchmark_existing_extensions.py` and compare all tables with
+`tools/compare_extension_results.py`. The first-two-column test plate can be
+recreated with `tools/subset_ome_zarr_plate.py`; it copies the selected wells and
+filters NGFF plate metadata and embedded OME-XML image/sample references.
+
 The workflow UI always writes complete source pixels with final labels. BIOMERO's
 shallower may remove verified duplicate arrays before transfer. The original
 source is retained. Legacy `--include-original-data false` and

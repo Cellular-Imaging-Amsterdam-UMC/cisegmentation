@@ -14,6 +14,7 @@ numcodecs>=0.12,<0.16
 PyYAML>=6,<7
 Pillow>=10,<13
 psutil>=5.9
+threadpoolctl>=3.5,<4
 duckdb==1.5.1
 pandas>=2.2,<4
 scikit-image>=0.24,<1

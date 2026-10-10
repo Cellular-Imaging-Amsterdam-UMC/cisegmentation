@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cisegmentation",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Agent skills for the Bilayers CI Segmentation workflow and its measurement databases.",
   "author": {
     "name": "Cellular Imaging Amsterdam UMC",

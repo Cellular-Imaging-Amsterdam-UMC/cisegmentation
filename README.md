@@ -45,7 +45,7 @@ root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.2`
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.3`
 image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.

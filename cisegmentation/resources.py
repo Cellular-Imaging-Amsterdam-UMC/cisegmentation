@@ -6,6 +6,7 @@ import math
 import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -108,6 +109,26 @@ class ResourceSnapshot:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class ResourceMonitor:
+    """Refresh headroom periodically rather than scanning processes per object.
+
+    Keep this monitor scoped to one measurement run or worker batch. Large
+    allocations still use the measured headroom; it is refreshed every 250 ms.
+    """
+
+    def __init__(self, interval=0.25):
+        self.interval = interval
+        self._value = None
+        self._checked = float("-inf")
+
+    def get(self):
+        now = time.monotonic()
+        if self._value is None or now - self._checked >= self.interval:
+            self._value = snapshot()
+            self._checked = now
+        return self._value
 
 
 def snapshot() -> ResourceSnapshot:
