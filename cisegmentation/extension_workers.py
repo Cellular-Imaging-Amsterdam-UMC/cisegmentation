@@ -22,14 +22,9 @@ def _initialize_worker():
     # Load both numerical backends before limiting them. In a spawned CLI worker
     # SciPy may otherwise load a second BLAS library after the initializer.
     from . import measurement_extensions  # noqa: F401
+    from .parallel_pipeline import _worker_environment
 
-    try:
-        from threadpoolctl import threadpool_limits
-    except ImportError:
-        # Minimal scientific environments may omit this optional dependency.
-        return
-    global _thread_limit
-    _thread_limit = threadpool_limits(limits=1)
+    _worker_environment()
 
 
 def compute_objects(

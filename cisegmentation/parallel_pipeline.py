@@ -1,21 +1,23 @@
 from __future__ import annotations
 
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
-from dataclasses import dataclass, replace
 import errno
 import hashlib
 import json
 import math
 import multiprocessing
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
-from threading import Event
 import time
 import traceback
-from typing import Any, Callable
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass, replace
+from pathlib import Path
+from threading import Event
+from typing import Any
 
 import numpy as np
 
@@ -24,20 +26,28 @@ from .ome_zarr_io import (
     ImageResource,
     LabelResult,
     existing_label_names,
-    read_native_label,
     read_image,
+    read_native_label,
     write_native_label_groups,
 )
+from .process_pool import close_pool
 from .registry import get_model_spec
+from .resources import (
+    allocated_cpus,
+    gpu_memory_error,
+    log_resource_check,
+    memory_error,
+    snapshot,
+    tile_size_error,
+)
 from .settings import SKIP, SegmentationSettings
-from .resources import allocated_cpus, memory_error, snapshot, tile_size_error
-
 
 GPU_MIN_RESERVE_MB = 2048.0
 GPU_RESERVE_FRACTION = 0.20
 GPU_WORKER_SAFETY_FACTOR = 1.50
 PROGRESS_HEARTBEAT_SECONDS = 15.0
 PROGRESS_PERCENT_STEP = 5.0
+_WORKER_THREADS_LOGGED = False
 
 
 def _duration_text(seconds: float) -> str:
@@ -64,17 +74,13 @@ class PhaseProgress:
         self.log = log
         self.started = time.perf_counter()
         self.last_emit = self.started
-        self.last_percent = (
-            100.0 * self.completed / self.total if self.total else 100.0
-        )
+        self.last_percent = 100.0 * self.completed / self.total if self.total else 100.0
         if self.log:
             self._emit(self.started)
 
     def _line(self, now: float) -> str:
         elapsed = max(0.0, now - self.started)
-        percent = (
-            100.0 * self.completed / self.total if self.total else 100.0
-        )
+        percent = 100.0 * self.completed / self.total if self.total else 100.0
         rate = self.completed / elapsed if elapsed > 0 else 0.0
         remaining = max(0, self.total - self.completed)
         eta = remaining / rate if rate > 0 else None
@@ -89,9 +95,7 @@ class PhaseProgress:
         if self.log:
             self.log(self._line(now))
         self.last_emit = now
-        self.last_percent = (
-            100.0 * self.completed / self.total if self.total else 100.0
-        )
+        self.last_percent = 100.0 * self.completed / self.total if self.total else 100.0
 
     def advance(self, count: int = 1) -> None:
         self.set_completed(self.completed + count)
@@ -99,9 +103,7 @@ class PhaseProgress:
     def set_completed(self, completed: int, *, force: bool = False) -> None:
         self.completed = max(0, min(int(completed), self.total))
         now = time.perf_counter()
-        percent = (
-            100.0 * self.completed / self.total if self.total else 100.0
-        )
+        percent = 100.0 * self.completed / self.total if self.total else 100.0
         if (
             force
             or self.completed == self.total
@@ -223,9 +225,7 @@ def build_model_passes(settings: SegmentationSettings) -> list[ModelPass]:
                         target="nuclei",
                         primary_channel=settings.cell_expansion_channel(),
                     ),
-                    InferenceConsumer(
-                        "Step 1 expansion nuclei", "expansion"
-                    ),
+                    InferenceConsumer("Step 1 expansion nuclei", "expansion"),
                 )
             )
         else:
@@ -320,8 +320,7 @@ def expected_channel_labels(settings: SegmentationSettings) -> list[str]:
     labels: list[str] = []
     has_cells = settings.cell_model != SKIP
     has_nuclei = (
-        settings.nucleus_model != SKIP
-        or settings.cell_expansion_model() is not None
+        settings.nucleus_model != SKIP or settings.cell_expansion_model() is not None
     )
     if has_cells and has_nuclei:
         labels.extend(("labels_cells", "labels_nuclei", "labels_cytoplasm"))
@@ -335,7 +334,9 @@ def expected_channel_labels(settings: SegmentationSettings) -> list[str]:
     return labels
 
 
-def unique_group_names(labels: list[str], occupied: set[str] | None = None) -> list[str]:
+def unique_group_names(
+    labels: list[str], occupied: set[str] | None = None
+) -> list[str]:
     used = set(occupied or ())
     names = []
     for index, label in enumerate(labels, start=1):
@@ -356,15 +357,12 @@ def resolve_label_policy(
     settings: SegmentationSettings,
 ) -> tuple[dict[str, list[str]], list[str], dict[str, list[str]]]:
     existing_by_resource = {
-        resource.image_path: existing_label_names(resource)
-        for resource in resources
+        resource.image_path: existing_label_names(resource) for resource in resources
     }
     generated_labels = expected_channel_labels(settings)
     base_names = unique_group_names(generated_labels)
     if settings.existing_labels == "append":
-        occupied = {
-            name for names in existing_by_resource.values() for name in names
-        }
+        occupied = {name for names in existing_by_resource.values() for name in names}
         generated_names = unique_group_names(generated_labels, occupied)
     else:
         generated_names = base_names
@@ -390,7 +388,10 @@ def _resource_key(resource: ImageResource) -> str:
 
 
 def _raw_path(
-    stage_dir: Path, model_pass: ModelPass, request: InferenceRequest, resource: ImageResource
+    stage_dir: Path,
+    model_pass: ModelPass,
+    request: InferenceRequest,
+    resource: ImageResource,
 ) -> Path:
     return (
         stage_dir
@@ -410,13 +411,24 @@ def _atomic_save(path: Path, array: np.ndarray) -> None:
 
 
 def _worker_environment() -> None:
-    for name in (
-        "OMP_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-    ):
-        os.environ[name] = "1"
+    from .resources import limit_worker_threads
+
+    limit_worker_threads()
+    global _WORKER_THREADS_LOGGED
+    if not _WORKER_THREADS_LOGGED:
+        from threadpoolctl import threadpool_info
+
+        log_resource_check(
+            None,
+            "worker_threads",
+            pid=os.getpid(),
+            blas_pools=[
+                {k: p[k] for k in ("internal_api", "num_threads")}
+                for p in threadpool_info()
+            ],
+            threads_per_backend=1,
+        )
+        _WORKER_THREADS_LOGGED = True
 
 
 def _process_gpu_memory_mb() -> float:
@@ -466,23 +478,31 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
 
                 apply_gpu_limit(torch)
                 torch.cuda.reset_peak_memory_stats()
-        except Exception:
+        except ImportError:
             torch = None
         read_started = time.perf_counter()
         from .streaming import infer_streamed, should_stream
 
-        streaming = bool(payload.get("force_streaming")) or should_stream(resource, SegmentationSettings(**model_pass.requests[0].settings))
+        streaming = bool(payload.get("force_streaming")) or should_stream(
+            resource, SegmentationSettings(**model_pass.requests[0].settings)
+        )
         image = read_image(resource, lazy=True) if streaming else read_image(resource)
         read_seconds = time.perf_counter() - read_started
         records: dict[str, list[dict[str, Any]]] = {}
         for request in model_pass.requests:
             request_settings = SegmentationSettings(**request.settings)
-            Path(str(_raw_path(stage_dir, model_pass, request, resource)) + ".points.sqlite").unlink(missing_ok=True)
+            Path(
+                str(_raw_path(stage_dir, model_pass, request, resource))
+                + ".points.sqlite"
+            ).unlink(missing_ok=True)
             spec = get_model_spec(request.model_id)
             if streaming:
                 infos, tile_read_seconds = infer_streamed(
-                    image, spec, request_settings,
-                    _raw_path(stage_dir, model_pass, request, resource), segment_czyx,
+                    image,
+                    spec,
+                    request_settings,
+                    _raw_path(stage_dir, model_pass, request, resource),
+                    segment_czyx,
                     allow_parallel=bool(payload.get("allow_tile_parallel", False)),
                     log=lambda message: print(message, flush=True),
                 )
@@ -502,7 +522,13 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
                 points = info.pop("_native_points", None)
                 if points is not None:
                     from .point_localizations import append_raw
-                    append_raw(str(_raw_path(stage_dir, model_pass, request, resource)) + ".points.sqlite", time_index, points)
+
+                    append_raw(
+                        str(_raw_path(stage_dir, model_pass, request, resource))
+                        + ".points.sqlite",
+                        time_index,
+                        points,
+                    )
                 infos.append(dict(info))
             _atomic_save(
                 _raw_path(stage_dir, model_pass, request, resource),
@@ -510,11 +536,7 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             )
             records[request.request_id] = infos
         first_info = next(
-            (
-                info
-                for request_infos in records.values()
-                for info in request_infos
-            ),
+            (info for request_infos in records.values() for info in request_infos),
             {},
         )
         device = str(first_info.get("device") or "cpu").lower()
@@ -525,16 +547,21 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             and torch is not None
             and torch.cuda.is_available()
         ):
-            torch_peak_cuda_mb = max(
-                float(torch.cuda.max_memory_reserved()),
-                float(torch.cuda.max_memory_allocated()),
-            ) / 1024**2
+            torch_peak_cuda_mb = (
+                max(
+                    float(torch.cuda.max_memory_reserved()),
+                    float(torch.cuda.max_memory_allocated()),
+                )
+                / 1024**2
+            )
             process_cuda_mb = _process_gpu_memory_mb()
-        peak_cuda_mb = max(torch_peak_cuda_mb, process_cuda_mb)
+        # NVML process accounting is often unavailable for MIG. Torch's
+        # allocator excludes the context and libraries, so reserve an explicit
+        # allowance per worker rather than treating its peak as complete VRAM.
+        context_allowance_mb = 512.0 if device.startswith("cuda") else 0.0
+        peak_cuda_mb = max(torch_peak_cuda_mb + context_allowance_mb, process_cuda_mb)
         tile_stats = [
-            info.get("streaming", {})
-            for infos in records.values()
-            for info in infos
+            info.get("streaming", {}) for infos in records.values() for info in infos
         ]
         # Child peaks are per worker. Their sum is a conservative estimate for
         # the field scheduler, rather than the parent's CUDA allocator peak.
@@ -569,12 +596,18 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             "peak_cuda_mb": peak_cuda_mb,
             "torch_peak_cuda_mb": torch_peak_cuda_mb,
             "process_cuda_mb": process_cuda_mb,
+            "cuda_context_allowance_mb": context_allowance_mb,
             "tile_cuda_estimate_mb": tile_cuda_estimate_mb,
             "rss_mb": rss_mb,
             "device": device,
         }
     except Exception as exc:
-        if (memory_error(exc) or tile_size_error(exc)) and not payload.get("force_streaming") and not locals().get("streaming", False):
+        if (
+            not gpu_memory_error(exc)
+            and (memory_error(exc) or tile_size_error(exc))
+            and not payload.get("force_streaming")
+            and not locals().get("streaming", False)
+        ):
             image = labels = labels_per_time = None
             exc.__traceback__ = None
             from .streaming import _cleanup_memory
@@ -589,41 +622,23 @@ def _inference_task(payload: dict[str, Any]) -> dict[str, Any]:
             "traceback": traceback.format_exc(),
             "memory_oom": memory_error(exc),
             "operation_size_limit": tile_size_error(exc),
-            "cuda_oom": "out of memory" in message.lower()
-            and "cuda" in (message + traceback.format_exc()).lower(),
+            "cuda_oom": gpu_memory_error(exc),
+            "force_streaming_suggested": not locals().get("streaming", False),
         }
 
 
 def _gpu_memory_mb() -> tuple[float, float] | None:
+    """The CUDA-visible device is authoritative, including an assigned MIG slice."""
     try:
         import torch
 
         if torch.cuda.is_available():
             current = snapshot()
-            return current.gpu_total / 1024**2, current.gpu_available / 1024**2
-    except ImportError:
-        pass
-    try:
-        process = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total,memory.free",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if process.returncode != 0 or not process.stdout.strip():
-            return None
-        total, free = (
-            float(value.strip())
-            for value in process.stdout.splitlines()[0].split(",")[:2]
-        )
-        return total, free
+            if current.gpu_total:
+                return current.gpu_total / 1024**2, current.gpu_available / 1024**2
     except Exception:
         return None
+    return None
 
 
 def calculate_gpu_workers(
@@ -645,6 +660,44 @@ def calculate_gpu_workers(
     if cap:
         workers = min(workers, cap)
     return min(workers, task_count)
+
+
+def _wait_gpu_headroom(peak_mb: float, log=None, *, timeout=30.0):
+    """Bounded wait after joined workers; never use a physical parent GPU."""
+    deadline = time.monotonic() + timeout
+    while True:
+        memory = _gpu_memory_mb()
+        if memory is None:
+            log_resource_check(log, "gpu_recovery", budget="unknown", workers_cap=1)
+            return None
+        total, free = memory
+        required = (
+            max(GPU_MIN_RESERVE_MB, total * GPU_RESERVE_FRACTION)
+            + peak_mb * GPU_WORKER_SAFETY_FACTOR
+        )
+        if free >= required:
+            log_resource_check(
+                log,
+                "gpu_recovery",
+                total_mib=total,
+                free_mib=free,
+                required_mib=required,
+                status="ready",
+            )
+            return memory
+        if time.monotonic() >= deadline:
+            log_resource_check(
+                log,
+                "gpu_recovery",
+                total_mib=total,
+                free_mib=free,
+                required_mib=required,
+                status="insufficient",
+            )
+            raise RuntimeError(
+                f"CUDA-visible device has insufficient recovery headroom: {free:.0f} MiB free, {required:.0f} MiB required; reduce model/tile size or free the allocated device"
+            )
+        time.sleep(0.5)
 
 
 def available_cpu_workers(task_count: int, cap: int = 0) -> int:
@@ -732,22 +785,87 @@ def _execute_tasks(
                 on_result(result)
         return results
     results = []
-    with ProcessPoolExecutor(
+    executor = ProcessPoolExecutor(
         max_workers=workers,
         mp_context=context,
         initializer=_worker_environment,
-    ) as executor:
-        futures = {
-            executor.submit(_inference_task, payload): payload["resource"].image_path
-            for payload in payloads
-        }
-        reporter = progress or PhaseProgress(
-            "Inference worker tasks", len(payloads), None
+    )
+    futures = {}
+    queued = iter(payloads)
+    reporter = progress or PhaseProgress("Inference worker tasks", len(payloads), None)
+    abort = False
+    try:
+        while True:
+            while not abort and len(futures) < workers * 2:
+                payload = next(queued, None)
+                if payload is None:
+                    break
+                futures[executor.submit(_inference_task, payload)] = payload[
+                    "resource"
+                ].image_path
+            if not futures or abort:
+                break
+            done, _ = wait(
+                futures, timeout=PROGRESS_HEARTBEAT_SECONDS, return_when=FIRST_COMPLETED
+            )
+            if not done:
+                reporter.heartbeat()
+            for future in done:
+                path = futures.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {
+                        "ok": False,
+                        "resource_path": path,
+                        "error": str(exc),
+                        "memory_oom": memory_error(exc)
+                        or isinstance(exc, BrokenProcessPool),
+                        "cuda_oom": gpu_memory_error(exc),
+                    }
+                results.append(result)
+                if on_result:
+                    on_result(result)
+                abort |= bool(result.get("cuda_oom") or result.get("memory_oom"))
+            if abort:
+                # Keep successes already returned by siblings, then cancel the
+                # unconfirmed work. A killed worker's partial output is not used.
+                for future, path in list(futures.items()):
+                    if future.done() and not future.cancelled():
+                        try:
+                            result = future.result()
+                        except Exception:
+                            continue
+                        results.append(result)
+                        if on_result:
+                            on_result(result)
+                        futures.pop(future)
+                for future in futures:
+                    future.cancel()
+    except BaseException:
+        abort = True
+        raise
+    finally:
+        close_pool(executor, abort=abort)
+    if abort:
+        log_resource_check(
+            reporter.log,
+            "pool_released",
+            workers=workers,
+            confirmed_successes=sum(bool(r.get("ok")) for r in results),
         )
-        for result in _iter_future_results(futures, reporter):
-            results.append(result)
-            if on_result:
-                on_result(result)
+        confirmed = {result["resource_path"] for result in results}
+        for payload in payloads:
+            path = payload["resource"].image_path
+            if path not in confirmed:
+                results.append(
+                    {
+                        "ok": False,
+                        "resource_path": path,
+                        "memory_oom": True,
+                        "error": "Unconfirmed work cancelled after a sibling allocation failure",
+                    }
+                )
     return results
 
 
@@ -784,9 +902,7 @@ def run_inference_passes(
         }
         probe_retries = 0
         while True:
-            probe = _execute_tasks(
-                [probe_payload], 1, progress=progress
-            )[0]
+            probe = _execute_tasks([probe_payload], 1, progress=progress)[0]
             if probe.get("ok"):
                 break
             probe_retries += 1
@@ -798,6 +914,19 @@ def run_inference_passes(
                 )
             if log:
                 log(f"  model probe retry {probe_retries}/2")
+            if probe.get("cuda_oom"):
+                _wait_gpu_headroom(512.0, log)
+            if probe.get("force_streaming_suggested"):
+                probe_payload["force_streaming"] = True
+            log_resource_check(
+                log,
+                "probe_retry",
+                model=model_pass.model_id,
+                retry=probe_retries,
+                error=probe.get("error"),
+                fresh_pool=True,
+                force_streaming=bool(probe_payload.get("force_streaming")),
+            )
         progress.advance()
         records[probe_resource.image_path].update(probe["records"])
         records[probe_resource.image_path]["__zarr_read_seconds__"] = [
@@ -808,7 +937,8 @@ def run_inference_passes(
             for resource in resources
             if resource.image_path != probe_resource.image_path
         ]
-        if probe["device"] == "cuda":
+        memory = None
+        if probe["device"].startswith("cuda"):
             memory = _gpu_memory_mb()
             workers = (
                 calculate_gpu_workers(
@@ -821,9 +951,14 @@ def run_inference_passes(
                 if memory is not None
                 else min(1, len(remaining))
             )
-            workers = min(workers, calculate_cpu_workers(
-                len(remaining), peak_worker_mb=float(probe["rss_mb"]), cap=settings.max_inference_workers
-            ))
+            workers = min(
+                workers,
+                calculate_cpu_workers(
+                    len(remaining),
+                    peak_worker_mb=float(probe["rss_mb"]),
+                    cap=settings.max_inference_workers,
+                ),
+            )
         else:
             workers = calculate_cpu_workers(
                 len(remaining),
@@ -831,7 +966,28 @@ def run_inference_passes(
                 cap=settings.max_inference_workers,
             )
         selected_workers = max(1, workers) if remaining else 1
+        initial_workers = selected_workers
+        allocation = snapshot().to_dict()
+        log_resource_check(
+            log,
+            "inference_sizing",
+            model=model_pass.model_id,
+            device=probe["device"],
+            workers=selected_workers,
+            effective=allocation,
+            gpu_memory_mib=memory,
+            probe_cuda_mib=probe["peak_cuda_mb"],
+            probe_rss_mib=probe["rss_mb"],
+            cuda_context_allowance_mib=probe.get("cuda_context_allowance_mb", 0),
+            gpu_safety_factor=GPU_WORKER_SAFETY_FACTOR,
+            gpu_reserve_fraction=GPU_RESERVE_FRACTION,
+            gpu_min_reserve_mib=GPU_MIN_RESERVE_MB,
+            requested_cap=settings.max_inference_workers,
+            blas_threads_per_worker=1,
+        )
         retries = 0
+        retry_limit = max(2, math.ceil(math.log2(selected_workers)) + 2)
+        force_streaming = bool(probe_payload.get("force_streaming"))
         pending = list(remaining)
         while pending:
             payloads = [
@@ -840,6 +996,7 @@ def run_inference_passes(
                     "model_pass": model_pass,
                     "stage_dir": str(stage_dir),
                     "allow_tile_parallel": False,
+                    "force_streaming": force_streaming,
                 }
                 for resource in pending
             ]
@@ -861,78 +1018,113 @@ def run_inference_passes(
                 for result in batch
                 if not result.get("ok")
             )
+            for result in batch:
+                if result.get("ok"):
+                    records[result["resource_path"]].update(result["records"])
+                    previous = records[result["resource_path"]].get(
+                        "__zarr_read_seconds__", [{"seconds": 0.0}]
+                    )[0]["seconds"]
+                    records[result["resource_path"]]["__zarr_read_seconds__"] = [
+                        {
+                            "seconds": float(previous)
+                            + float(result["zarr_read_seconds"])
+                        }
+                    ]
             if resource_oom:
-                successful_batch = sum(
-                    bool(result.get("ok")) for result in batch
-                )
-                progress.set_completed(
-                    progress.completed - successful_batch,
-                    force=True,
-                )
                 for resource in pending:
+                    if resource.image_path not in failed_paths:
+                        continue
                     for request in model_pass.requests:
                         raw_path = _raw_path(stage_dir, model_pass, request, resource)
                         if not raw_path.resolve().is_relative_to(stage_dir.resolve()):
-                            raise RuntimeError("Raw result cleanup outside staging directory")
+                            raise RuntimeError(
+                                "Raw result cleanup outside staging directory"
+                            )
                         if raw_path.is_dir():
                             shutil.rmtree(raw_path)
                         else:
                             raw_path.unlink(missing_ok=True)
-                        records[resource.image_path].pop(
-                            request.request_id, None
-                        )
-            else:
-                for result in batch:
-                    if result.get("ok"):
-                        records[result["resource_path"]].update(
-                            result["records"]
-                        )
-                        previous = records[result["resource_path"]].get(
-                            "__zarr_read_seconds__", [{"seconds": 0.0}]
-                        )[0]["seconds"]
-                        records[result["resource_path"]][
-                            "__zarr_read_seconds__"
-                        ] = [
-                            {
-                                "seconds": float(previous)
-                                + float(result["zarr_read_seconds"])
-                            }
-                        ]
+                        for suffix in (
+                            ".partial",
+                            ".points.sqlite",
+                            ".points.sqlite-wal",
+                            ".points.sqlite-shm",
+                        ):
+                            Path(str(raw_path) + suffix).unlink(missing_ok=True)
             if not failed_paths:
                 break
             retries += 1
-            if retries > 2:
+            if retries > (retry_limit if resource_oom else 2):
                 first = next(result for result in batch if not result.get("ok"))
                 raise RuntimeError(
-                    f"Inference failed after two retries for "
+                    f"Inference failed after {retries - 1} retries for "
                     f"{model_pass.model_id}: {first.get('error')}\n"
                     f"{first.get('traceback', '')}"
                 )
             if resource_oom:
+                previous_workers = selected_workers
                 selected_workers = max(1, selected_workers // 2)
-            if not resource_oom:
-                pending = [
-                    resource
-                    for resource in pending
-                    if resource.image_path in failed_paths
-                ]
+                selected_workers = min(
+                    selected_workers,
+                    calculate_cpu_workers(
+                        len(failed_paths),
+                        peak_worker_mb=float(probe["rss_mb"]),
+                        cap=settings.max_inference_workers,
+                    ),
+                )
+                if probe["device"].startswith("cuda"):
+                    memory = _wait_gpu_headroom(float(probe["peak_cuda_mb"]), log)
+                    selected_workers = min(
+                        selected_workers,
+                        calculate_gpu_workers(
+                            total_mb=memory[0],
+                            free_mb=memory[1],
+                            peak_worker_mb=float(probe["peak_cuda_mb"]),
+                            task_count=len(failed_paths),
+                            cap=settings.max_inference_workers,
+                        )
+                        if memory
+                        else 1,
+                    )
+                force_streaming |= any(
+                    result.get("force_streaming_suggested") for result in batch
+                )
+                log_resource_check(
+                    log,
+                    "inference_retry",
+                    model=model_pass.model_id,
+                    retry=retries,
+                    previous_workers=previous_workers,
+                    workers=selected_workers,
+                    effective=snapshot().to_dict(),
+                    gpu_memory_mib=memory,
+                    fresh_pool=True,
+                    preserved_successes=sum(bool(r.get("ok")) for r in batch),
+                    failed_fields=len(failed_paths),
+                    force_streaming=force_streaming,
+                    errors=[r.get("error") for r in batch if not r.get("ok")],
+                )
+            pending = [
+                resource for resource in pending if resource.image_path in failed_paths
+            ]
             if log:
                 log(
-                    f"  retry {retries}/2: {len(pending)} field(s), "
+                    f"  retry {retries}/{retry_limit if resource_oom else 2}: {len(pending)} field(s), "
                     f"{selected_workers} worker(s)"
                 )
         pass_provenance = {
             "model": model_pass.model_id,
             "device": probe["device"],
             "probe_peak_cuda_mb": float(probe["peak_cuda_mb"]),
-            "probe_torch_peak_cuda_mb": float(
-                probe.get("torch_peak_cuda_mb", 0.0)
-            ),
-            "probe_process_cuda_mb": float(
-                probe.get("process_cuda_mb", 0.0)
-            ),
+            "probe_torch_peak_cuda_mb": float(probe.get("torch_peak_cuda_mb", 0.0)),
+            "probe_process_cuda_mb": float(probe.get("process_cuda_mb", 0.0)),
             "probe_rss_mb": float(probe["rss_mb"]),
             "workers": selected_workers,
+            "initial_workers": initial_workers,
+            "resource_allocation": allocation,
+            "cuda_context_allowance_mb": float(
+                probe.get("cuda_context_allowance_mb", 0)
+            ),
             "tasks": len(resources),
             "retries": retries + probe_retries,
             "probe_retries": probe_retries,
@@ -1012,15 +1204,22 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
     overlay_path = Path(payload["overlay_path"])
     generated_names: list[str] = payload["generated_names"]
     final_names: list[str] = payload["final_names"]
-    (stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite").unlink(missing_ok=True)
+    (stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite").unlink(
+        missing_ok=True
+    )
     try:
-        if any(_raw_path(stage_dir, model_pass, request, resource).is_dir()
-               for model_pass in passes for request in model_pass.requests):
+        if any(
+            _raw_path(stage_dir, model_pass, request, resource).is_dir()
+            for model_pass in passes
+            for request in model_pass.requests
+        ):
             from .streaming import finalize_streamed
 
             return finalize_streamed(payload)
         image = read_image(resource)
-        request_by_kind: dict[str, list[tuple[ModelPass, InferenceRequest, InferenceConsumer]]] = {}
+        request_by_kind: dict[
+            str, list[tuple[ModelPass, InferenceRequest, InferenceConsumer]]
+        ] = {}
         for model_pass in passes:
             for request in model_pass.requests:
                 for consumer in request.consumers:
@@ -1111,9 +1310,7 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
                 time_channels.append(cell_labels)
                 time_labels.append("labels_cells")
             elif nucleus_labels is not None:
-                nucleus_labels, next_id = engine._offset_labels(
-                    nucleus_labels, next_id
-                )
+                nucleus_labels, next_id = engine._offset_labels(nucleus_labels, next_id)
                 time_channels.append(nucleus_labels)
                 time_labels.append("labels_nuclei")
             for index, (_model_pass, request, consumer) in enumerate(
@@ -1122,10 +1319,18 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
                 labels = consume("foci", time_index, index)
                 if settings.measurement_extensions_enabled():
                     from .point_localizations import finalize_points
+
                     mapping = {int(v): int(v) + next_id for v in np.unique(labels) if v}
-                    finalize_points(str(_raw_path(stage_dir, _model_pass, request, resource)) + ".points.sqlite",
-                                    stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite",
-                                    generated_names[len(time_channels)], time_index, mapping)
+                    finalize_points(
+                        str(_raw_path(stage_dir, _model_pass, request, resource))
+                        + ".points.sqlite",
+                        stage_dir
+                        / "final-points"
+                        / f"{_resource_key(resource)}.sqlite",
+                        generated_names[len(time_channels)],
+                        time_index,
+                        mapping,
+                    )
                 labels, next_id = engine._offset_labels(labels, next_id)
                 time_channels.append(labels)
                 time_labels.append(
@@ -1152,9 +1357,7 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
             [dict(info.get("timings", {})) for info in infos]
         )
         timings["zarr_read_seconds"] = float(
-            records.get("__zarr_read_seconds__", [{"seconds": 0.0}])[0][
-                "seconds"
-            ]
+            records.get("__zarr_read_seconds__", [{"seconds": 0.0}])[0]["seconds"]
         )
         provenance = {
             "device": infos[-1].get("device") if infos else None,
@@ -1212,7 +1415,9 @@ def _finalize_task(payload: dict[str, Any]) -> dict[str, Any]:
             "resource_path": resource.image_path,
             "provenance": provenance,
             "channel_labels": channel_labels,
-            "point_localizations": str(stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite"),
+            "point_localizations": str(
+                stage_dir / "final-points" / f"{_resource_key(resource)}.sqlite"
+            ),
             "zarr_write_seconds": time.perf_counter() - write_started,
         }
     except Exception as exc:
@@ -1237,8 +1442,17 @@ def run_label_finalization(
     log: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, dict], dict]:
     phase_started = time.perf_counter()
-    workers = available_cpu_workers(
-        len(resources), settings.max_measurement_workers
+    workers = calculate_cpu_workers(
+        len(resources), peak_worker_mb=512, cap=settings.max_measurement_workers
+    )
+    log_resource_check(
+        log,
+        "finalization_sizing",
+        workers=workers,
+        effective=snapshot(include_gpu=False).to_dict(),
+        requested_cap=settings.max_measurement_workers,
+        estimated_worker_rss_mib=512,
+        blas_threads_per_worker=1,
     )
     progress = PhaseProgress(
         "Label finalization",
@@ -1277,18 +1491,14 @@ def run_label_finalization(
                 initializer=_worker_environment,
             ) as executor:
                 futures = {
-                    executor.submit(_finalize_task, item): item[
-                        "resource"
-                    ].image_path
+                    executor.submit(_finalize_task, item): item["resource"].image_path
                     for item in payloads
                 }
                 for result in _iter_future_results(futures, progress):
                     results.append(result)
                     if result["ok"]:
                         progress.advance()
-        failures = {
-            result["resource_path"] for result in results if not result["ok"]
-        }
+        failures = {result["resource_path"] for result in results if not result["ok"]}
         for result in results:
             if result["ok"]:
                 completed[result["resource_path"]] = result
@@ -1301,9 +1511,7 @@ def run_label_finalization(
                 f"Label finalization failed after two retries: "
                 f"{first['error']}\n{first['traceback']}"
             )
-        pending = [
-            resource for resource in pending if resource.image_path in failures
-        ]
+        pending = [resource for resource in pending if resource.image_path in failures]
         if log:
             log(f"Label finalization retry {retries}/2 for {len(pending)} field(s)")
     return completed, {
@@ -1311,8 +1519,7 @@ def run_label_finalization(
         "retries": retries,
         "runtime_seconds": time.perf_counter() - phase_started,
         "zarr_write_seconds": sum(
-            float(item.get("zarr_write_seconds", 0.0))
-            for item in completed.values()
+            float(item.get("zarr_write_seconds", 0.0)) for item in completed.values()
         ),
     }
 
@@ -1327,7 +1534,9 @@ def resolved_label_result(
     """Load the label view that will exist after applying an overlay."""
     from .streaming import ChannelStack, should_stream
 
-    streaming = should_stream(resource, SegmentationSettings(**(provenance.get("parameters") or {})))
+    streaming = should_stream(
+        resource, SegmentationSettings(**(provenance.get("parameters") or {}))
+    )
     image = read_image(resource, lazy=True) if streaming else read_image(resource)
     generated = set(generated_names)
     arrays = []
@@ -1335,12 +1544,17 @@ def resolved_label_result(
     for name in final_names:
         if name in generated:
             arrays.append(
-                read_native_label(resource, name, store_path=overlay_path, lazy=True) if streaming
+                read_native_label(resource, name, store_path=overlay_path, lazy=True)
+                if streaming
                 else read_native_label(resource, name, store_path=overlay_path)
             )
             origins.append("generated")
         else:
-            arrays.append(read_native_label(resource, name, lazy=True) if streaming else read_native_label(resource, name))
+            arrays.append(
+                read_native_label(resource, name, lazy=True)
+                if streaming
+                else read_native_label(resource, name)
+            )
             origins.append("existing")
     if not arrays:
         raise ValueError(f"No resolved labels for {resource.name}")
@@ -1372,9 +1586,7 @@ def write_overlay_manifest(
         if settings.existing_labels == "remove":
             replace_paths = [f"{prefix}labels"]
         elif settings.existing_labels == "overwrite":
-            replace_paths = [
-                f"{prefix}labels/{name}" for name in generated_names
-            ]
+            replace_paths = [f"{prefix}labels/{name}" for name in generated_names]
         else:
             replace_paths = []
         fields.append(
@@ -1383,9 +1595,7 @@ def write_overlay_manifest(
                 "existing_labels": existing_by_resource[resource.image_path],
                 "final_labels": final_by_resource[resource.image_path],
                 "replace_paths": replace_paths,
-                "remove_existing_labels_tree": (
-                    settings.existing_labels == "remove"
-                ),
+                "remove_existing_labels_tree": (settings.existing_labels == "remove"),
             }
         )
     manifest = {
@@ -1468,9 +1678,7 @@ def copy_source_store(
             return
         now = time.perf_counter()
         elapsed = max(0.0, now - started)
-        percent = (
-            100.0 * copied_bytes / total_bytes if total_bytes else 100.0
-        )
+        percent = 100.0 * copied_bytes / total_bytes if total_bytes else 100.0
         if not (
             force
             or percent - last_percent >= PROGRESS_PERCENT_STEP
@@ -1540,9 +1748,7 @@ def _move_or_copy_tree(source: Path, destination: Path) -> str:
     try:
         shutil.copytree(source, partial)
         if _tree_manifest(source) != _tree_manifest(partial):
-            raise OSError(
-                "Cross-filesystem label copy verification failed"
-            )
+            raise OSError("Cross-filesystem label copy verification failed")
         _rename_with_retry(partial, destination)
         shutil.rmtree(source)
     except Exception:
@@ -1563,10 +1769,10 @@ def recover_label_commit(store: Path) -> bool:
         backup_path = store / item["backup_path"]
         if labels_path.exists() and backup_path.exists():
             for name in item.get("preserve", []):
-                    current = labels_path / name
-                    restored = backup_path / name
-                    if current.exists() and not restored.exists():
-                        _rename_with_retry(current, restored)
+                current = labels_path / name
+                restored = backup_path / name
+                if current.exists() and not restored.exists():
+                    _rename_with_retry(current, restored)
         if labels_path.exists():
             shutil.rmtree(labels_path)
         if item["had_labels"] and backup_path.exists():
@@ -1610,9 +1816,7 @@ def commit_overlay_labels(
         if settings.existing_labels == "remove":
             preserve = []
         elif settings.existing_labels == "overwrite":
-            preserve = [
-                name for name in preserve if name not in set(generated_names)
-            ]
+            preserve = [name for name in preserve if name not in set(generated_names)]
         fields.append(
             {
                 "resource_path": resource.image_path,
@@ -1637,16 +1841,12 @@ def commit_overlay_labels(
         )
         for resource in resources
     )
-    for index, metadata_path in enumerate(
-        dict.fromkeys(metadata_paths)
-    ):
+    for index, metadata_path in enumerate(dict.fromkeys(metadata_paths)):
         journal["metadata"].append(
             {
                 "path": metadata_path.as_posix(),
                 "backup_path": (
-                    Path(backup_root_name)
-                    / "metadata"
-                    / f"{index:06d}.zattrs"
+                    Path(backup_root_name) / "metadata" / f"{index:06d}.zattrs"
                 ).as_posix(),
                 "existed": (source_store / metadata_path).exists(),
             }
@@ -1675,9 +1875,7 @@ def commit_overlay_labels(
                 for name in item["preserve"]:
                     old_group = backup_labels / name
                     if old_group.exists():
-                        _rename_with_retry(
-                            old_group, source_labels / name
-                        )
+                        _rename_with_retry(old_group, source_labels / name)
         if not retain_journal:
             if backup_root.exists():
                 shutil.rmtree(backup_root)

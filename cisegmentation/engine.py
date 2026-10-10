@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from copy import deepcopy
 import json
 import math
-from pathlib import Path
 import shutil
-from threading import Event
 import time
-from dataclasses import replace
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import replace
+from pathlib import Path
+from threading import Event
 
 import numpy as np
 
@@ -36,7 +36,6 @@ from .reporting import (
     workflow_report_lines,
 )
 from .settings import OUTPUT_NAME_POSTFIX, SKIP, SegmentationSettings
-
 
 _INFERENCE_CACHE_SETTING_NAMES = (
     "model",
@@ -1010,6 +1009,18 @@ def run_workflow(
     settings.validate_steps()
     for line in workflow_report_lines(settings):
         emit(log, line)
+    from . import __version__
+    from .resources import limit_main_threads, log_resource_check, resource_diagnostics
+
+    limit_main_threads()
+    diagnostics = resource_diagnostics(inspect_gpu=settings.device != "cpu")
+    log_resource_check(
+        log, "startup", version=__version__, requested_device=settings.device,
+        max_inference_workers=settings.max_inference_workers,
+        max_measurement_workers=settings.max_measurement_workers, **diagnostics,
+    )
+    if "budget_error" in diagnostics:
+        raise RuntimeError(diagnostics["budget_error"])
     stores = discover_ome_zarrs(input_path)
     if input_path.is_dir() and input_path.resolve() == output_dir.resolve():
         generated_outputs = [

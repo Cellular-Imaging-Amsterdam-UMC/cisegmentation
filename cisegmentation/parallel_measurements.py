@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor
-from datetime import datetime, timezone
 import multiprocessing
 import os
-from pathlib import Path
 import sqlite3
 import time
 import traceback
+from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from . import __version__
@@ -24,7 +24,7 @@ from .parallel_pipeline import (
     PhaseProgress,
     _iter_future_results,
     _worker_environment,
-    available_cpu_workers,
+    calculate_cpu_workers,
     resolved_label_result,
 )
 from .settings import SegmentationSettings
@@ -70,20 +70,20 @@ def _open_database(path: Path, database_format: str):
     if database_format == "sqlite":
         return sqlite3.connect(path)
     import duckdb
-    from .resources import MIB, snapshot
+
+    from .resources import configure_database
 
     connection = duckdb.connect(str(path), read_only=True)
-    resources = snapshot()
-    limit_mb = max(64, min(2048, resources.ram_available // (4 * MIB)))
-    connection.execute(f"SET memory_limit = '{limit_mb}MB'")
-    connection.execute(f"SET threads = {resources.cpus}")
+    configure_database(connection)
     return connection
 
 
 def _table_rows(connection, table: str) -> tuple[tuple[str, ...], list[tuple]]:
     info = connection.execute(f"PRAGMA table_info('{table}')").fetchall()
     columns = tuple(str(row[1]) for row in info)
-    rows = [tuple(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
+    rows = [
+        tuple(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()
+    ]
     return columns, rows
 
 
@@ -97,7 +97,8 @@ def _remap(row: tuple, offsets: dict[int, int]) -> tuple:
 def _copy_large_table(connection, writer, table: str, offsets: dict[int, int]) -> int:
     """Copy object-sized tables in bounded batches, including their ID mapping."""
     columns = tuple(
-        str(row[1]) for row in connection.execute(f"PRAGMA table_info('{table}')").fetchall()
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info('{table}')").fetchall()
     )
     cursor = connection.execute(f"SELECT * FROM {table}")
     count = 0
@@ -197,9 +198,7 @@ def merge_measurement_shards(
             writer.insert("images", columns, mapped_images)
 
             channel_columns, channels = _table_rows(connection, "channels")
-            channel_index_by_id = {
-                int(row[0]): int(row[2]) for row in channels
-            }
+            channel_index_by_id = {int(row[0]): int(row[2]) for row in channels}
             writer.insert(
                 "channels",
                 channel_columns,
@@ -220,9 +219,7 @@ def merge_measurement_shards(
                     for row in labels
                 ],
             )
-            source_columns, sources = _table_rows(
-                connection, "label_set_sources"
-            )
+            source_columns, sources = _table_rows(connection, "label_set_sources")
             writer.insert(
                 "label_set_sources",
                 source_columns,
@@ -234,25 +231,44 @@ def merge_measurement_shards(
                     for row in sources
                 ],
             )
-            object_count = _copy_large_table(connection, writer, "objects", {
-                0: offsets["object"], 1: offsets["image"], 2: offsets["label"],
-            })
-            intensity_count = _copy_large_table(connection, writer, "intensity_measurements", {
-                0: offsets["object"], 1: offsets["channel"],
-            })
-            relationship_count = _copy_large_table(connection, writer, "relationships", {
-                0: offsets["relationship"], 1: offsets["image"],
-                3: offsets["object"], 4: offsets["object"],
-                5: offsets["label"], 6: offsets["label"],
-            })
+            object_count = _copy_large_table(
+                connection,
+                writer,
+                "objects",
+                {
+                    0: offsets["object"],
+                    1: offsets["image"],
+                    2: offsets["label"],
+                },
+            )
+            intensity_count = _copy_large_table(
+                connection,
+                writer,
+                "intensity_measurements",
+                {
+                    0: offsets["object"],
+                    1: offsets["channel"],
+                },
+            )
+            relationship_count = _copy_large_table(
+                connection,
+                writer,
+                "relationships",
+                {
+                    0: offsets["relationship"],
+                    1: offsets["image"],
+                    3: offsets["object"],
+                    4: offsets["object"],
+                    5: offsets["label"],
+                    6: offsets["label"],
+                },
+            )
             quality_columns, quality_rows = _table_rows(
                 connection, "image_quality_measurements"
             )
             for row in quality_rows:
                 record = dict(zip(quality_columns, row))
-                record["channel_index"] = channel_index_by_id[
-                    int(record["channel_id"])
-                ]
+                record["channel_index"] = channel_index_by_id[int(record["channel_id"])]
                 record["image_id"] += offsets["image"]
                 record["channel_id"] += offsets["channel"]
                 image_quality_records.append(record)
@@ -298,9 +314,7 @@ def merge_measurement_shards(
             IMAGE_QUALITY_COLUMNS,
             quality_rows,
         )
-        field_rows = _field_quality_rows(
-            field_quality_records, image_quality_records
-        )
+        field_rows = _field_quality_rows(field_quality_records, image_quality_records)
         writer.insert(
             "field_quality_measurements",
             FIELD_QUALITY_COLUMNS,
@@ -349,8 +363,19 @@ def write_parallel_measurements(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     phase_started = time.perf_counter()
     shard_dir.mkdir(parents=True, exist_ok=True)
-    workers = available_cpu_workers(
-        len(resources), settings.max_measurement_workers
+    workers = calculate_cpu_workers(
+        len(resources), peak_worker_mb=512, cap=settings.max_measurement_workers
+    )
+    from .resources import log_resource_check, snapshot
+
+    log_resource_check(
+        log,
+        "measurement_sizing",
+        workers=workers,
+        effective=snapshot(include_gpu=False).to_dict(),
+        requested_cap=settings.max_measurement_workers,
+        estimated_worker_rss_mib=512,
+        blas_threads_per_worker=1,
     )
     progress = PhaseProgress(
         "Measurements",
@@ -371,12 +396,9 @@ def write_parallel_measurements(
                     "overlay_path": str(overlay_path),
                     "final_names": final_by_resource[resource.image_path],
                     "generated_names": generated_names,
-                    "provenance": finalization[resource.image_path][
-                        "provenance"
-                    ],
+                    "provenance": finalization[resource.image_path]["provenance"],
                     "shard": str(
-                        shard_dir
-                        / f"{suffix}.{settings.measurements_database}"
+                        shard_dir / f"{suffix}.{settings.measurements_database}"
                     ),
                     "database_format": settings.measurements_database,
                     "output_ome_zarr": str(output_ome_zarr),
@@ -406,9 +428,7 @@ def write_parallel_measurements(
                     results.append(result)
                     if result["ok"]:
                         progress.advance()
-        failures = {
-            result["resource_path"] for result in results if not result["ok"]
-        }
+        failures = {result["resource_path"] for result in results if not result["ok"]}
         for result in results:
             if result["ok"]:
                 completed[result["resource_path"]] = Path(result["shard"])
@@ -421,9 +441,7 @@ def write_parallel_measurements(
                 f"Measurements failed after two retries: {first['error']}\n"
                 f"{first['traceback']}"
             )
-        pending = [
-            resource for resource in pending if resource.image_path in failures
-        ]
+        pending = [resource for resource in pending if resource.image_path in failures]
         if log:
             log(f"Measurement retry {retries}/2 for {len(pending)} field(s)")
 

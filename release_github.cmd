@@ -144,7 +144,10 @@ echo Pushing tag %TAG%...
 call :run_or_echo git push origin "%TAG%"
 if errorlevel 1 goto :fail_after_tag
 echo Creating GitHub release %TAG%...
-call :run_or_echo gh release create "%TAG%" --verify-tag --title "%TAG%" --generate-notes
+set "PRERELEASE_FLAGS="
+echo %TAG%| findstr /C:"-" >nul
+if not errorlevel 1 set "PRERELEASE_FLAGS=--prerelease --latest=false"
+call :run_or_echo gh release create "%TAG%" --verify-tag --title "%TAG%" --generate-notes %PRERELEASE_FLAGS%
 if errorlevel 1 goto :fail_after_push
 
 popd >nul

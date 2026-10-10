@@ -45,7 +45,7 @@ root. Tests clean `tests/inputfolder` and `tests/outputfolder`, then copy fresh
 OME-Zarr fixtures from `tests/data` into the test input folder when required.
 The launcher provides separate **Run Docker** and **Run Locally** buttons; local
 mode uses the active Python environment and executes `wrapper.py` directly.
-**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.3`
+**Run Docker** uses the locally built, release-pinned `w_cisegmentation:v0.6.4-beta`
 image; the
 organization-qualified image in `config.yaml` is reserved for BIOMERO registry
 metadata.
@@ -67,6 +67,13 @@ folder, never a child of the input OME-Zarr. For full-data output, a verified
 source copy runs alongside label finalization and generated labels are committed
 only to that copy. The final store and database become visible only after every
 phase succeeds.
+
+The `v0.6.4-beta` workflow logs allocation and worker decisions with the prefix
+`[CISEGMENTATION_RESOURCE_CHECK]`, including Slurm CPU/RAM limits and the
+CUDA-visible GPU/MIG memory budget. See the
+[resource log and MIG acceptance guide](docs/slurm-resource-checks.md).
+Beta publication updates its explicit version tag and leaves stable Docker Hub
+`latest` unchanged.
 
 ## Streaming large fields
 

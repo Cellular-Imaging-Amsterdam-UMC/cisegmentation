@@ -86,18 +86,20 @@ def run_batch(path, args, tmp_path, env):
 
 @WINDOWS_ONLY
 @pytest.mark.parametrize("skip_build", [False, True])
+@pytest.mark.parametrize("version", ["v9.8.7", "v9.8.7-beta"])
 def test_publication_dry_run_never_builds_or_publishes_optional_images(
-    tmp_path, skip_build
+    tmp_path, skip_build, version
 ):
     repo, env = command_repo(tmp_path)
+    (repo / "version.txt").write_text(version + "\n")
     args = ["--dry-run"] + (["--skip-build"] if skip_build else [])
     result = run_batch(repo / "pushdocker.cmd", args, tmp_path, env)
     assert result.returncode == 0, result.stdout + result.stderr
     pushes = re.findall(r'\[dry-run\] docker push "([^"]+)"', result.stdout)
-    assert pushes == [
-        "cellularimagingcf/w_cisegmentation:v9.8.7",
-        "cellularimagingcf/w_cisegmentation:latest",
-    ]
+    expected = [f"cellularimagingcf/w_cisegmentation:{version}"]
+    if "-" not in version:
+        expected.append("cellularimagingcf/w_cisegmentation:latest")
+    assert pushes == expected
     assert "gradio" not in result.stdout and "jupyter" not in result.stdout
     assert not Path(env["DOCKER_CALL_LOG"]).exists()
 

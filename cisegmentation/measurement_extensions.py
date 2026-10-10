@@ -59,11 +59,9 @@ def connect_database(path, database_format, *, read_only=False):
     import duckdb
 
     db = duckdb.connect(str(path), read_only=read_only)
-    resources = snapshot()
-    db.execute(f"SET threads={max(1, resources.cpus)}")
-    db.execute(
-        f"SET memory_limit='{max(64, min(1024, resources.ram_available // (8 * MIB)))}MB'"
-    )
+    from .resources import configure_database
+
+    configure_database(db, memory_cap_mib=1024, memory_divisor=8)
     return db
 
 
@@ -365,6 +363,17 @@ def write_extensions(
     geometry_id, track_offset, lineage_offset = 0, 0, 0
     workers = ExtensionWorkers(settings.max_measurement_workers)
     try:
+        from .resources import log_resource_check, snapshot
+
+        log_resource_check(
+            log,
+            "extension_sizing",
+            workers=workers.workers,
+            effective=snapshot(include_gpu=False).to_dict(),
+            requested_cap=settings.max_measurement_workers,
+            estimated_worker_rss_mib=512,
+            blas_threads_per_worker=1,
+        )
         db.execute("BEGIN TRANSACTION")
         for statement in _SCHEMA.split(";"):
             if statement.strip():

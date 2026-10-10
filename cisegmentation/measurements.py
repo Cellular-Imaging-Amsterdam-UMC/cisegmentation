@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import math
 import os
-from pathlib import Path
 import sqlite3
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import numpy as np
@@ -14,7 +14,6 @@ import numpy as np
 from . import __version__
 from .ome_zarr_io import LabelResult, _label_group_names, new_output_store_uuid
 from .settings import OUTPUT_NAME_POSTFIX
-
 
 SCHEMA_VERSION = 5
 DATABASE_FORMATS = {"duckdb": ".duckdb", "sqlite": ".sqlite"}
@@ -376,12 +375,9 @@ class _DatabaseWriter:
                     "DuckDB measurements require the pinned duckdb package"
                 ) from exc
             self.connection = duckdb.connect(str(path))
-            from .resources import MIB, snapshot
+            from .resources import configure_database
 
-            resources = snapshot()
-            self.connection.execute(f"SET threads={resources.cpus}")
-            memory_mb = max(64, min(2048, int(resources.ram_available * 0.25 / MIB)))
-            self.connection.execute(f"SET memory_limit='{memory_mb}MB'")
+            configure_database(self.connection)
         elif database_format == "sqlite":
             self.connection = sqlite3.connect(path)
             self.connection.execute("PRAGMA foreign_keys=ON")
@@ -1259,10 +1255,9 @@ def write_measurements_database(
             image_id = next_image_id
             source = result.source
             if getattr(source.data, "streamed", False):
-                from .streaming import ChunkCache
-
                 # Source pixels and finalized labels are immutable in this phase.
                 from .resources import MIB, snapshot
+                from .streaming import ChunkCache
 
                 cache = ChunkCache(
                     min(64 * MIB, max(MIB, snapshot().ram_available // 64))

@@ -17,6 +17,6 @@ RUN if [ "$INSTALL_CHECKPOINT_DEPENDENCIES" = true ]; then \
 COPY cisegmentation/ /app/cisegmentation/
 COPY wrapper.py bilayers_cli.py config.yaml /app/
 COPY tools/cuda_smoke.py /app/tools/cuda_smoke.py
-RUN python -m compileall -q -j 0 /app
+RUN python -m compileall -q -j 1 /app
 
 ENTRYPOINT ["python", "/app/wrapper.py"]

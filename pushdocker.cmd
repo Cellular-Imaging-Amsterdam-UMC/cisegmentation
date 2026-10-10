@@ -61,6 +61,9 @@ if /I not "%FULL_IMAGE%"=="cellularimagingcf/w_cisegmentation" (
 
 echo Docker image: %FULL_IMAGE%
 echo Version: %VERSION%
+set "PUBLISH_LATEST=1"
+echo %VERSION%| findstr /C:"-" >nul
+if not errorlevel 1 set "PUBLISH_LATEST=0"
 if "%DRY_RUN%"=="0" if "%CONFIRMED%"=="0" (
     echo ERROR: Publishing Docker images requires explicit confirmation.
     echo Re-run with --yes, or use --dry-run to inspect all commands safely.
@@ -84,8 +87,12 @@ if "%SKIP_BUILD%"=="0" (
 
 call :tag_and_push "%IMAGE_NAME%:%VERSION%" "%FULL_IMAGE%:%VERSION%"
 if errorlevel 1 goto :push_failed
-call :tag_and_push "%IMAGE_NAME%:latest" "%FULL_IMAGE%:latest"
-if errorlevel 1 goto :push_failed
+if "%PUBLISH_LATEST%"=="1" (
+    call :tag_and_push "%IMAGE_NAME%:latest" "%FULL_IMAGE%:latest"
+    if errorlevel 1 goto :push_failed
+) else (
+    echo Prerelease: stable Docker Hub latest is unchanged.
+)
 
 popd >nul
 if "%DRY_RUN%"=="1" (

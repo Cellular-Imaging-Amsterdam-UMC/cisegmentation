@@ -153,10 +153,10 @@ def _tile_task(payload):
     from .parallel_pipeline import _process_gpu_memory_mb
     from .resources import apply_gpu_limit
 
-    apply_gpu_limit(torch)
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
     try:
+        apply_gpu_limit(torch)
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         with _PeakRSS() as monitor:
             data = np.load(payload["input"], mmap_mode="c", allow_pickle=False)
             predicted, info = payload["segment"](
@@ -179,7 +179,9 @@ def _tile_task(payload):
         ):
             allocated_mb = torch.cuda.max_memory_allocated() / MIB
             reserved_mb = torch.cuda.max_memory_reserved() / MIB
-            gpu_mb = max(reserved_mb, allocated_mb, _process_gpu_memory_mb())
+            gpu_mb = max(
+                max(reserved_mb, allocated_mb) + 512.0, _process_gpu_memory_mb()
+            )
         return {
             "ok": True,
             "info": info,
@@ -373,10 +375,12 @@ def iter_tile_predictions(
             item["input"].unlink(missing_ok=True)
             item["output"].unlink(missing_ok=True)
 
-        def stop_pool():
+        def stop_pool(*, abort=False):
             nonlocal pool
             if pool is not None:
-                pool.shutdown(wait=True, cancel_futures=True)
+                from .process_pool import close_pool
+
+                close_pool(pool, abort=abort)
                 pool = None
 
         try:
@@ -414,7 +418,7 @@ def iter_tile_predictions(
                 _retry(
                     core, probe_queue, spec, stats, result["kind"], result["error"], log
                 )
-                stop_pool()
+                stop_pool(abort=result["kind"] == "memory")
                 stats["worker_restarts"] += 1
                 pool = _pool(1)
             # Insert the fitted probe and any unprocessed probe children at their
@@ -442,6 +446,18 @@ def iter_tile_predictions(
                     f"Streaming {spec.id}: tile probe RSS={profile['rss_mb']:.1f} MiB, "
                     f"CUDA={profile['cuda_mb']:.1f} MiB; selected {workers} tile worker(s)"
                 )
+            from .resources import log_resource_check
+
+            log_resource_check(
+                log,
+                "tile_sizing",
+                model=spec.id,
+                workers=workers,
+                probe_rss_mib=profile["rss_mb"],
+                probe_cuda_mib=profile["cuda_mb"],
+                effective=stats["probe_resources"],
+                blas_threads_per_worker=1,
+            )
             pool = _pool(workers)
             while queue or pending:
                 while queue and len(pending) < workers:
@@ -491,7 +507,7 @@ def iter_tile_predictions(
                     }
                 if not result["ok"]:
                     retry_items = [item, *pending]
-                    stop_pool()
+                    stop_pool(abort=result["kind"] == "memory")
                     pending.clear()
                     queue.extendleft(
                         reversed([retry_item["core"] for retry_item in retry_items])
@@ -519,6 +535,24 @@ def iter_tile_predictions(
                         )
                     stats["workers"] = workers
                     stats["worker_restarts"] += 1
+                    if result["kind"] == "memory":
+                        if str(profile["info"].get("device", "cpu")).startswith("cuda"):
+                            from .parallel_pipeline import _wait_gpu_headroom
+
+                            _wait_gpu_headroom(profile["cuda_mb"], log)
+                        workers = min(
+                            workers,
+                            _worker_count(max(1, len(queue)), profile, settings),
+                        )
+                        stats["workers"] = workers
+                        log_resource_check(
+                            log,
+                            "tile_retry",
+                            workers=workers,
+                            error=result["error"],
+                            fresh_pool=True,
+                            effective=snapshot().to_dict(),
+                        )
                     pool = _pool(workers)
                     continue
                 predicted = np.load(item["output"], mmap_mode="r", allow_pickle=False)
