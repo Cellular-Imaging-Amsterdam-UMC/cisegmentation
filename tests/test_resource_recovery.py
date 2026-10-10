@@ -274,7 +274,10 @@ def _small_pool_task(payload):
     return {"ok": True, "resource_path": path}
 
 
-def test_failed_pool_terminates_unfinished_workers_and_preserves_success(monkeypatch):
+@pytest.mark.parametrize("attempt", range(5))
+def test_failed_pool_terminates_unfinished_workers_and_preserves_success(
+    monkeypatch, attempt
+):
     monkeypatch.delenv("CISEGMENTATION_INLINE_WORKERS", raising=False)
     monkeypatch.setattr(pipeline, "_inference_task", _small_pool_task)
     owned = []
