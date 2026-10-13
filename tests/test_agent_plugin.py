@@ -5,8 +5,8 @@ import re
 import tomllib
 from pathlib import Path
 
-from packaging.version import Version
 import yaml
+from packaging.version import Version
 
 from cisegmentation import __version__
 
