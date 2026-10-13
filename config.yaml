@@ -57,6 +57,16 @@ outputs:
   timepoints: true
   tiled: true
   pyramidal: true
+- name: measurements_database_out
+  type: measurement
+  label: Measurements Database
+  description: DuckDB (default) or SQLite measurements database written next to each output OME-Zarr in /data/out, one per top-level input image or HCS plate. Absent when Create Measurements Database is Skip or in benchmark mode. Attach as a file annotation in BIOMERO.
+  optional: true
+  format: [duckdb, sqlite]
+  folder_name: /data/out
+  file_count: multiple
+  section_id: outputs
+  mode: beginner
 display_only: []
 parameters:
 - name: cell_model
