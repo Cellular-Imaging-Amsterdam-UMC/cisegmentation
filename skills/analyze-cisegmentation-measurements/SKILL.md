@@ -2,7 +2,7 @@
 name: analyze-cisegmentation-measurements
 description: Analyze CI Segmentation DuckDB or SQLite databases for morphology, intensity, mask relationships, spot assignments, spatial neighbors and contacts, Pearson/Manders colocalization, trajectories, cell/nucleus divisions, and linked WKB polygons or subpixel spot points; includes SQL, pandas, calibration and interpretation.
 metadata:
-  version: "6"
+  version: "7"
 ---
 
 # Instructions
@@ -11,7 +11,8 @@ Help the user inspect and analyze a CI Segmentation measurements database.
 
 ## Required reference
 
-The consumer must load this reference automatically when the skill activates:
+Read this reference before substantive queries if the consumer has not already
+loaded it:
 
 ```text
 references/REFERENCE.md
@@ -19,6 +20,8 @@ references/REFERENCE.md
 
 Use that resource as the authoritative reference for the database schema,
 measurement semantics, convenience views, and query examples.
+Check the file's recorded schema before applying the bundled reference to a
+database from a different revision.
 
 For spatial, colocalization, tracking or geometry questions, also load
 [EXTENSIONS.md](references/EXTENSIONS.md). Base schema version 5 alone does

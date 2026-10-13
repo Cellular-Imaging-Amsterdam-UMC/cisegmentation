@@ -1,6 +1,6 @@
 # Slurm allocation checks and MIG acceptance test
 
-Version `v0.6.4-beta` writes JSON lines prefixed with
+Version `v0.6.4` writes JSON lines prefixed with
 `[CISEGMENTATION_RESOURCE_CHECK]` to the workflow stdout captured by Slurm/BIOMERO.
 They are always enabled, independently of label logging. Search the job log for
 that prefix to compare the requested allocation with actual scheduling decisions.
@@ -62,10 +62,10 @@ recovery wait is bounded to 30 seconds; persistent pressure raises a clear error
 
 ## Acceptance cluster validation
 
-Pull the beta explicitly; stable `latest` remains unchanged:
+Pull the version explicitly for reproducible validation:
 
 ```sh
-docker pull cellularimagingcf/w_cisegmentation:v0.6.4-beta
+docker pull cellularimagingcf/w_cisegmentation:v0.6.4
 ```
 
 Configure the acceptance workflow/SIF to use this tag, then run inside the
@@ -77,7 +77,7 @@ separate controlled recovery test; it never increases the visible allocation.
 
 For issue #3, collect the log and verify:
 
-1. The startup version is `0.6.4-beta`, the intended partition/job/step is logged,
+1. The startup version matches the installed tag, the intended partition/job/step is logged,
    and effective CPUs/RAM are no larger than the job allocation.
 2. On the original approximately 12 GiB MIG allocation, GPU memory reflects that
    slice rather than the 80 GiB parent; identify the visible device/UUID.
@@ -91,9 +91,38 @@ For issue #3, collect the log and verify:
    fields. Verify no orphan GPU processes remain for the completed job.
 
 Local CPU tests simulate MIG discovery and allocation failures. They do not
-replace validation on a real Slurm MIG allocation. Keep
+replace validation on a real Slurm MIG allocation.
+
+## Real MIG validation: job 3532793
+
+The original automatic worker-sizing failure in
 [issue #3](https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation/issues/3)
-open until this acceptance test succeeds.
+was closed as completed after the 12–13 October 2026 run with `v0.6.4-beta`.
+The stable release retains that resource handling and the subsequent worker
+shutdown fix, which waits for operating-system exit signals.
+
+| Evidence | Observed result |
+| --- | --- |
+| Device | H100 NVL MIG 1g.12gb; CUDA-visible 11,008 MiB total, 10,898 MiB free at startup |
+| Job allocation | 18 CPUs and 64 GiB RAM; affinity and cgroup limits confirmed |
+| Automatic GPU workers | StarDist nuclei: 5; StarDist foci: 5; Spotiflow: 1 |
+| CPU workers | 17 for label finalization and measurement extraction; one BLAS thread per worker backend |
+| Scope | 2,844 fields, 316 wells; all five expected label sets cover every field |
+| Failures/retries | No CUDA/cuBLAS allocation failures, tracebacks or OOM retries logged |
+| Elapsed | CI process: 5,189.10 seconds; full workflow: approximately 10h 07m |
+
+These are observed worker counts for this workload, not fixed recommended
+counts for every model or image. Probe estimates are sizing inputs, not a
+continuous measurement of GPU peak use. Sampled RAM headroom is not MaxRSS.
+Structural database/label completeness does not establish biological accuracy.
+
+The [closing evidence and full HTML report](https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation/issues/3#issuecomment-6141354229)
+record the source checks and timing limits. The successful beta run did not
+exercise forced OOM recovery: controlled failure, orphan-worker checks,
+preservation of completed fields and fresh-budget/shrinking-pool checks remain
+follow-up validation. Automatic versus single-worker mask/measurement
+comparison and broader model/MIG-profile coverage also remain unverified.
+Keep these validation limits separate from the resolved sizing defect.
 
 Allocation semantics: [Slurm sbatch](https://slurm.schedmd.com/sbatch.html) and
 [Slurm GPU/MIG GRES documentation](https://slurm.schedmd.com/gres.html).

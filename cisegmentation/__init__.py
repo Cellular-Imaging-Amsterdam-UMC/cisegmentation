@@ -3,4 +3,4 @@
 from .registry import MODEL_REGISTRY, ModelSpec, get_model_spec
 
 __all__ = ["MODEL_REGISTRY", "ModelSpec", "get_model_spec"]
-__version__ = "0.6.4-beta"
+__version__ = "0.6.4"

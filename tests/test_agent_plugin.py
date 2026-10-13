@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
+from packaging.version import Version
 import yaml
 
 from cisegmentation import __version__
@@ -26,7 +28,7 @@ def test_agent_plugin_manifest_and_skills():
     assert manifest["$schema"] == (
         "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
     )
-    assert manifest["version"] == "0.6.4-beta"
+    assert manifest["version"] == __version__
     declared = manifest["extensions"]["nl.bioimaging.biomero"]["skills"]
     assert set(declared) == {path.name for path in SKILLS.iterdir() if path.is_dir()}
 
@@ -72,13 +74,13 @@ def test_workflow_skill_documents_every_descriptor_parameter():
 
 def test_versions_are_synchronized():
     manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
-    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     config = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
-    assert manifest["version"] == "0.6.4-beta"
     assert __version__ == manifest["version"]
-    assert 'version = "0.6.4b0"' in pyproject  # PEP 440 spelling of the beta
-    assert (ROOT / "version.txt").read_text(encoding="utf-8").strip() == "v0.6.4-beta"
-    assert config["docker_image"]["tag"] == "v0.6.4-beta"
+    assert Version(pyproject["project"]["version"]) == Version(__version__)
+    tag = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
+    assert tag.removeprefix("v") == __version__
+    assert config["docker_image"]["tag"] == tag
 
 
 def test_skill_content_is_platform_neutral():

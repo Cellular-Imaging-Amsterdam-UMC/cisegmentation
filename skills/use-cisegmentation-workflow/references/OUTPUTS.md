@@ -8,11 +8,14 @@ For each top-level input, expect one final OME-Zarr named:
 <source>__cisegmentation.ome.zarr
 ```
 
-With native labels enabled, original pixels and datatype remain at the root and
+In the default full-data output, original pixels and datatype remain at the root and
 each segmentation is an OME-Zarr 0.4 image-label under `labels/`. Possible label
 sets include cells, nuclei, cytoplasm, spots, foci, and bacteria. Duplicate
 Step 3 selections receive collision-safe group names. Regular images remain
 images; HCS inputs retain their plate/well/field organization.
+
+Legacy CLI labels-only overlays omit source arrays and require the original
+store for image pixels. They are not self-contained full-data outputs.
 
 When `measurements_database` is not `skip`, also expect exactly one database
 file per top-level input:
@@ -69,3 +72,8 @@ Treat a run as successful only when:
 
 Report missing or partial outputs even if the scheduler job ended. Do not claim
 that optional labels exist when their corresponding steps were skipped.
+
+For plate completeness, compare distinct field counts per enabled label set
+against expected input fields. Verify `output_store_uuid` agrees between the
+store metadata and measurement provenance when both are present. Report these
+as structural checks, separate from scientific mask-quality validation.

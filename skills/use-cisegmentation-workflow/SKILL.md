@@ -2,7 +2,7 @@
 name: use-cisegmentation-workflow
 description: Configure, launch, monitor, and recover the Bilayers CI Segmentation workflow for OME-Zarr images or HCS plates using Cellpose, Cellpose-SAM, StarDist, InstanSeg, or Spotiflow, including spot-only detection, spatial and colocalization measurements, cell/nucleus lineages, independent spot trajectories, and separate geometry databases.
 metadata:
-  version: "3"
+  version: "4"
 ---
 
 # Use CI Segmentation Workflow
@@ -43,3 +43,8 @@ polygon display in an image viewer.
 
 For retained public validation inputs, read [PUBLICDATA.md](references/PUBLICDATA.md)
 before choosing reference trajectories or interpreting calibration and overlap.
+
+For worker sizing, GPU/MIG allocation or a runtime timeline, read
+[RESOURCES.md](references/RESOURCES.md). Do not treat probe budgets as measured
+peak utilization, add overlapping phase durations, or infer stage boundaries
+from filesystem timestamps.
