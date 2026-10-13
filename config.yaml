@@ -63,6 +63,7 @@ outputs:
   description: DuckDB (default) or SQLite measurements database written next to each output OME-Zarr in /data/out, one per top-level input image or HCS plate. Absent when Create Measurements Database is Skip or in benchmark mode.
   optional: true
   format: [duckdb, sqlite]
+  unique_string: [_measurements.duckdb, _measurements.sqlite]
   folder_name: /data/out
   file_count: multiple
   section_id: outputs
