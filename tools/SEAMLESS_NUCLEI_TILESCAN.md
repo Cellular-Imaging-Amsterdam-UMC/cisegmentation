@@ -37,8 +37,8 @@ the underlying grid visible; `random-field` is the default for new images.
 This tool rearranges real nucleus cutouts on an estimated synthetic background.
 The accompanying reference masks are derived from the source model
 segmentation and donor placements, not manually annotated biological ground
-truth. The source TIFF is not modified. Spatial calibration is written only
-when `--pixel-size-um` is provided; TIFF print resolution is not interpreted
+truth. The source TIFF is not modified. The seamless generator writes **0.34 x 0.34 micrometres** by default
+(or an explicit `--pixel-size-um` override); TIFF print resolution is not interpreted
 as microscopy calibration.
 
 ## Run the 4 × 4 experiment
@@ -115,3 +115,50 @@ or rows locked to the grid.
 The original `create_tilescan_ome_zarr.py` retains its existing CLI behavior.
 Its Python writer now also accepts a custom renderer and an optional uint32
 reference-mask renderer; the new seam-aware tool reuses that writer.
+
+
+## Paired nuclei and cytoplasm/aggregate channels
+
+`--multichannel` accepts a CYX TIFF or an OME-Zarr store with `--source-field`.
+It reads one T/Z plane at native resolution. Channel numbers are one-based.
+The defaults use channel 1 for nuclei and channel 2 for cytoplasm/aggregates.
+
+The bundled StarDist adapter detects nuclei. `cellpose3:cyto3` detects cells
+using a detection-only copy of the green channel: smooth background subtraction,
+5th/95th-percentile contrast clipping and gamma 0.5. The original channel
+intensities are retained for output. Source calibration, when explicitly in
+micrometres, controls model sizing; the requested synthetic output calibration
+is separate and does not resample source pixels.
+
+Complete intersecting nuclei and cell masks are grouped. A conservative DoG
+candidate mask also protects bright extracellular aggregates. All sizes can be
+sampled as donors, including these small objects. Both channels use identical
+object IDs, positions and rotations/reflections. Whole cells cannot overlap or
+be cropped at the outer output border. The default 24-pixel halo and 12-pixel
+inward taper blend the cytoplasm margin, including boundaries where a neighbour
+was excluded. Nucleus and aggregate core pixels remain exactly unchanged.
+This is a synthetic test image with model-derived references, not biological
+ground truth or a validated aggregate count.
+
+```powershell
+& 'V:\BIOMERO-local\tests\cisegmentation\python.exe' `
+  tools/create_seamless_nuclei_tilescan.py `
+  'V:\NL-BIOMERO\web\L-Drive\Project B\PicoScreens\TestScreens\CellsSmall\.processed\20220714_TKI_482.ome.zarr' `
+  'V:\NL-BIOMERO\web\L-Drive\Project B\CellsSmall_A01_paired-4x4.ome.zarr' `
+  --source-field A/1/0 --multichannel --rows 4 --columns 4 `
+  --models-root 'V:\BIOMERO-local\seamless-models' --pixel-size-um 0.34
+```
+
+Use the repository's pinned Cellpose 3 legacy dependency from `requirements.txt`.
+The model cache must contain the bundled StarDist checkpoint; Cellpose downloads
+its checkpoint on first use. CPU execution is supported. `--mask` and
+`--cell-mask` together can reuse saved nucleus and whole-cell TIFF masks.
+Existing output paths are never overwritten. Multichannel output currently
+supports `random-field` layout and OME-Zarr output; TIFF export is rejected
+explicitly rather than silently dropping channels.
+
+The 4x4 output from the 2008x2008 source is `[1, 2, 1, 8032, 8032]` in TCZYX
+order. Both NGFF scales at every level and OME-XML carry 0.34 micrometres at
+level zero. `labels_protected_objects_reference` records the complete copied
+objects. Diagnostics include source cell/nucleus outlines, the paired cleaned
+source, the overview, a native-resolution join crop, placement plan and report.

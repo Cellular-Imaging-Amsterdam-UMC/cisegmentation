@@ -79,7 +79,8 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
                     pixel_size_um=None, transforms=None, region_renderer=None,
                     extra_metadata=None, channel_label='Cells',
                     label_renderer=None, label_name='labels_nuclei_reference',
-                    label_max_id=None):
+                    label_max_id=None, channel_images=None, channel_renderers=None,
+                    channel_names=None, channel_colors=None):
     started = time.perf_counter()
     source_path, output_path = Path(source_path), Path(output_path)
     if min(height, width, chunk_size, pyramid_min_size) < 1:
@@ -91,11 +92,19 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     temporary = output_path.with_name(output_path.name + '.partial')
     if output_path.exists() or temporary.exists():
         raise FileExistsError(f'Refusing to overwrite {output_path} or {temporary}')
-    with tifffile.TiffFile(source_path) as tif:
-        series = tif.series[0]
-        if series.axes != 'YX' or len(series.shape) != 2:
-            raise ValueError(f'Expected a single-channel YX TIFF, found {series.axes}/{series.shape}')
-        tile = series.asarray()
+    if channel_images is None:
+        with tifffile.TiffFile(source_path) as tif:
+            series = tif.series[0]
+            if series.axes != 'YX' or len(series.shape) != 2:
+                raise ValueError(f'Expected a single-channel YX TIFF, found {series.axes}/{series.shape}')
+            tile = series.asarray()
+        channel_images = [tile]
+    else:
+        channel_images = [np.asarray(image) for image in channel_images]
+        tile = channel_images[0]
+        if any(image.shape != tile.shape or image.dtype != tile.dtype for image in channel_images):
+            raise ValueError('All source channels must share shape and dtype')
+    channel_count = len(channel_images)
     if tile.shape[0] != tile.shape[1]:
         raise ValueError('Square source tiles are required for 90-degree rotations')
     rows, columns = math.ceil(height / tile.shape[0]), math.ceil(width / tile.shape[1])
@@ -110,20 +119,26 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     if transforms.shape != (rows, columns, 3):
         raise ValueError('Transform grid must match the output tile grid')
     renderer = region_renderer or render_region
+    renderers = channel_renderers or [renderer] * channel_count
+    if len(renderers) != channel_count:
+        raise ValueError("One renderer is required per channel")
     if label_renderer is not None and (label_max_id is None or
             not 0 <= label_max_id <= np.iinfo(np.uint32).max):
         raise ValueError('Reference label maximum must fit uint32')
     scales = {axis: 1.0 for axis in 'tczyx'}
     if pixel_size_um is not None:
         scales['y'] = scales['x'] = pixel_size_um
-    source = ImageData(tile[None,None,None], tuple('tczyx'), scales,
+    source = ImageData(np.stack(channel_images)[None,:,None], tuple('tczyx'), scales,
                        {'omero': {'channels': [{'label':channel_label, 'color':'FFFFFF'}]}},
                        ImageResource(source_path), str(tile.dtype))
     metadata_result = LabelResult(np.empty((0,), dtype=np.uint32), source,
                                   'synthetic-tilescan', 'image')
-    channels = _source_channel_metadata(metadata_result, 1)
-    channels[0]['window']['start'] = float(np.percentile(tile, 1))
-    channels[0]['window']['end'] = float(np.percentile(tile, 99.5))
+    channels = _source_channel_metadata(metadata_result, channel_count)
+    for channel, pixels in enumerate(channel_images):
+        channels[channel]['label'] = (channel_names or [channel_label] * channel_count)[channel]
+        channels[channel]['color'] = (channel_colors or ['FFFFFF'] * channel_count)[channel]
+        channels[channel]['window']['start'] = float(np.percentile(pixels, 1))
+        channels[channel]['window']['end'] = float(np.percentile(pixels, 99.5))
     name = output_path.name.removesuffix('.ome.zarr')
     root = zarr.open_group(str(temporary), mode='w', zarr_version=2)
     compressor = Blosc(cname='zstd', clevel=5, shuffle=Blosc.BITSHUFFLE)
@@ -132,7 +147,7 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     level_height, level_width = height, width
     while True:
         index = len(arrays)
-        array = root.create_dataset(str(index), shape=(1,1,1,level_height,level_width),
+        array = root.create_dataset(str(index), shape=(1,channel_count,1,level_height,level_width),
             dtype=tile.dtype, chunks=(1,1,1,min(chunk_size,level_height),min(chunk_size,level_width)),
             compressor=compressor, dimension_separator='/')
         array.attrs['_ARRAY_DIMENSIONS'] = list('tczyx')
@@ -149,7 +164,7 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     root.attrs['omero'] = {'version':'0.4','name':name,'channels':channels,
                            'rdefs':{'defaultT':0,'defaultZ':0,'model':'greyscale'}}
     root.attrs['synthetic_tilescan'] = {
-        'source':source_path.name, 'source_sha256':hashlib.sha256(source_path.read_bytes()).hexdigest(),
+        'source':source_path.name, 'source_sha256':hashlib.sha256(source_path.read_bytes() if source_path.is_file() else np.stack(channel_images).tobytes()).hexdigest(),
         'source_shape_yx':list(tile.shape), 'target_shape_yx':[height,width], 'seed':seed,
         'tile_grid_yx':[rows,columns], 'transforms':transforms.tolist(),
         'transform_fields':['rotation_quarter_turns','flip_y','flip_x'],
@@ -176,7 +191,7 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
             'description':'Source segmentation masks and copied donor masks; not manually annotated ground truth',
             'pyramid_filter':'nearest-neighbour; instance IDs unchanged'}
         for index, array in enumerate(arrays):
-            labels_array = group.create_dataset(str(index), shape=array.shape,
+            labels_array = group.create_dataset(str(index), shape=(1,1,1,*array.shape[-2:]),
                 dtype=np.uint32, chunks=array.chunks, compressor=compressor,
                 dimension_separator='/')
             labels_array.attrs['_ARRAY_DIMENSIONS'] = list('tczyx')
@@ -187,12 +202,13 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
             bh = min(chunk_size, h-y)
             for x in range(0, w, chunk_size):
                 bw = min(chunk_size, w-x)
-                if index == 0:
-                    block = renderer(tile, transforms, y, x, bh, bw)
-                else:
-                    previous = arrays[index-1]
-                    block = mean_downsample(previous[0,0,0,y*2:min((y+bh)*2,previous.shape[-2]),x*2:min((x+bw)*2,previous.shape[-1])])
-                array[0,0,0,y:y+bh,x:x+bw] = block
+                for channel, render_channel in enumerate(renderers):
+                    if index == 0:
+                        block = render_channel(channel_images[channel], transforms, y, x, bh, bw)
+                    else:
+                        previous = arrays[index-1]
+                        block = mean_downsample(previous[0,channel,0,y*2:min((y+bh)*2,previous.shape[-2]),x*2:min((x+bw)*2,previous.shape[-1])])
+                    array[0,channel,0,y:y+bh,x:x+bw] = block
                 if label_arrays:
                     if index == 0:
                         label_block = label_renderer(y, x, bh, bw)
@@ -226,7 +242,8 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     points += [(int(check_rng.integers(height)), int(check_rng.integers(width))) for _ in range(16)]
     for y, x in points:
         bh, bw = min(23,height-y), min(29,width-x)
-        np.testing.assert_array_equal(arrays[0][0,0,0,y:y+bh,x:x+bw], renderer(tile,transforms,y,x,bh,bw))
+        for channel, render_channel in enumerate(renderers):
+            np.testing.assert_array_equal(arrays[0][0,channel,0,y:y+bh,x:x+bw], render_channel(channel_images[channel],transforms,y,x,bh,bw))
         if label_arrays:
             np.testing.assert_array_equal(label_arrays[0][0,0,0,y:y+bh,x:x+bw],
                                           label_renderer(y,x,bh,bw))
@@ -234,8 +251,9 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
         previous, current = arrays[index-1], arrays[index]
         for y, x in [(0,0),(max(0,current.shape[-2]-17),max(0,current.shape[-1]-19))]:
             bh, bw = min(17,current.shape[-2]-y), min(19,current.shape[-1]-x)
-            expected = mean_downsample(previous[0,0,0,y*2:min((y+bh)*2,previous.shape[-2]),x*2:min((x+bw)*2,previous.shape[-1])])
-            np.testing.assert_array_equal(current[0,0,0,y:y+bh,x:x+bw], expected)
+            for channel in range(channel_count):
+                expected = mean_downsample(previous[0,channel,0,y*2:min((y+bh)*2,previous.shape[-2]),x*2:min((x+bw)*2,previous.shape[-1])])
+                np.testing.assert_array_equal(current[0,channel,0,y:y+bh,x:x+bw], expected)
     manifest = dict(root.attrs['synthetic_tilescan'])
     manifest.update({'complete':True, 'elapsed_seconds':round(time.perf_counter()-started,2),
                      'validation':'exact source windows, tile seams, edges and every pyramid level passed'})
@@ -243,7 +261,7 @@ def create_tilescan(source_path, output_path, *, height=40000, width=40000,
     root.store.close()
     _install_store(temporary, output_path)
     assert len(enumerate_resources(output_path)) == 1
-    summary = {'output':str(output_path), 'shape_tczyx':[1,1,1,height,width],
+    summary = {'output':str(output_path), 'shape_tczyx':[1,channel_count,1,height,width],
                'dtype':str(tile.dtype), 'tile_grid_yx':[rows,columns], 'levels':len(arrays),
                'validation':'PASS', 'elapsed_seconds':manifest['elapsed_seconds']}
     print(json.dumps(summary), flush=True)

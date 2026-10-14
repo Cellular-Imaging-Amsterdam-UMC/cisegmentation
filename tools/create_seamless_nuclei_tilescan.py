@@ -109,12 +109,14 @@ class Placement:
     kind: str
 
 
-def extract_donors(image, labels, *, clearance, halo, allow_neighbours=False):
+def extract_donors(image, labels, *, clearance, halo, allow_neighbours=False, all_sizes=False):
     areas = np.bincount(labels.ravel())
     positive = areas[1:][areas[1:] > 0]
     if len(positive) == 0:
         raise ValueError('No source nuclei found')
     low, high = np.percentile(positive, [5, 95] if allow_neighbours else [10, 85])
+    if all_sizes:
+        low, high = 1, int(areas.max())
     donors = []
     for label_id, bounds in enumerate(ndi.find_objects(labels), start=1):
         if bounds is None or not low <= areas[label_id] <= high:
@@ -392,7 +394,7 @@ class RandomNucleiPlan(NucleiPlan):
     bucket_size = 128
 
     def __init__(self,image,labels,height,width,*,seed=20261005,
-                 clearance=48,halo=6,gap=1):
+                 clearance=48,halo=6,gap=1,include_all_sizes=False):
         if image.ndim != 2 or image.shape[0] != image.shape[1]:
             raise ValueError('A square, single-channel 2D source is required')
         if image.dtype not in (np.dtype('uint8'),np.dtype('uint16')):
@@ -407,7 +409,7 @@ class RandomNucleiPlan(NucleiPlan):
         self.cleaned,self.kept,self.cleaning = clean_tile(image,self.labels,
             clearance=clearance,halo=halo)
         self.donors = extract_donors(image,self.labels,clearance=clearance,
-                                    halo=halo,allow_neighbours=True)
+                                    halo=halo,allow_neighbours=True,all_sizes=include_all_sizes)
         variants = np.concatenate([self.rng.permutation(8)
             for _ in range(math.ceil(self.rows*self.columns/8))])[:self.rows*self.columns]
         self.transforms = np.stack((variants%4,np.zeros_like(variants),variants//4),axis=-1)
@@ -543,7 +545,7 @@ def segment_source(image, *, device='cpu', models_root=None):
     os.environ['CISEGMENTATION_MODELS'] = str(models_root or Path(__file__).resolve().parents[1]/'bundled_models')
     model = 'stardist:SD_Nuclei_Versatile'
     # Detection-only scales avoid resampling the source. The output remains
-    # uncalibrated unless --pixel-size-um is explicitly provided by the user.
+    # calibrated independently by the writer (0.34 um by default).
     labels,info = segment_czyx(image[None,None],get_model_spec(model),
         SegmentationSettings(model=model,target='nuclei',device=device),
         {'x':0.5,'y':0.5,'z':1},bounded=True)
@@ -683,7 +685,7 @@ def export_tiff_strips(array, path):
 def build(source, output, *, rows=4, columns=4, height=None, width=None,
           seed=20261005, clearance=48, halo=6, gap=1, device='cpu',
           models_root=None, mask=None, diagnostics_dir=None,
-          pixel_size_um=None, chunk_size=512, export_tiff=False,layout='random-field'):
+          pixel_size_um=0.34, chunk_size=512, export_tiff=False,layout='random-field'):
     source,output = Path(source),Path(output)
     folder = Path(diagnostics_dir) if diagnostics_dir else output.with_name(output.name.removesuffix('.ome.zarr')+'_diagnostics')
     if output.exists() or output.with_name(output.name+'.partial').exists() or folder.exists():
@@ -739,8 +741,8 @@ def main():
     p.add_argument('--height',type=int)
     p.add_argument('--width',type=int)
     p.add_argument('--seed',type=int,default=20261005)
-    p.add_argument('--clearance',type=int,default=48)
-    p.add_argument('--halo',type=int,default=6)
+    p.add_argument('--clearance',type=int)
+    p.add_argument('--halo',type=int)
     p.add_argument('--gap',type=int,default=1)
     p.add_argument('--layout',choices=['random-field','tile-repair'],default='random-field',
                    help='Whole-field random placement (default), or the original tile-edge repair')
@@ -748,11 +750,25 @@ def main():
     p.add_argument('--models-root',type=Path)
     p.add_argument('--mask',type=Path,help='Existing 2D instance labels (.npy or TIFF), background 0')
     p.add_argument('--diagnostics-dir',type=Path)
-    p.add_argument('--pixel-size-um',type=float)
+    p.add_argument('--pixel-size-um',type=float,default=0.34)
     p.add_argument('--chunk-size',type=int,default=512)
     p.add_argument('--export-tiff',action='store_true',help='Also export a full-resolution TIFF using bounded-memory strips')
+    p.add_argument('--multichannel', action='store_true', help='Move complete cells in all source channels together')
+    p.add_argument('--source-field', help='NGFF field path, for example A/1/0')
+    p.add_argument('--nuclei-channel', type=int, default=1, help='One-based nucleus channel')
+    p.add_argument('--cell-channel', type=int, default=2, help='One-based cytoplasm/aggregate channel')
+    p.add_argument('--cell-mask', type=Path, help='Existing complete-cell instance mask TIFF')
     args = vars(p.parse_args())
-    build(**args)
+    multichannel = args.pop('multichannel') or args['source'].is_dir()
+    args['clearance'] = (160 if multichannel else 48) if args['clearance'] is None else args['clearance']
+    args['halo'] = (24 if multichannel else 6) if args['halo'] is None else args['halo']
+    if multichannel:
+        from tools.seamless_cells import build_multichannel
+        build_multichannel(**args)
+    else:
+        for name in ('source_field', 'nuclei_channel', 'cell_channel', 'cell_mask'):
+            args.pop(name)
+        build(**args)
 
 
 if __name__ == '__main__':
