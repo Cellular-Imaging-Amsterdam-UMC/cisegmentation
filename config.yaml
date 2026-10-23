@@ -6,7 +6,7 @@ citations:
 docker_image:
   org: cellularimagingcf
   name: w_cisegmentation
-  tag: v0.6.4
+  tag: v0.6.5
   platform: linux/amd64
 algorithm_folder_name: cisegmentation_inference
 exec_function:
@@ -57,6 +57,19 @@ outputs:
   timepoints: true
   tiled: true
   pyramidal: true
+- name: measurements_database_out
+  type: measurement
+  label: Measurements Database
+  description: DuckDB (default) or SQLite measurements database written next to each output OME-Zarr in /data/out, one per top-level input image or HCS plate. Absent when Create Measurements Database is Skip or in benchmark mode.
+  cli_tag: "None"
+  default: ""
+  optional: true
+  format: [duckdb, sqlite]
+  unique_string: [_measurements.duckdb, _measurements.sqlite]
+  folder_name: /data/out
+  file_count: multiple
+  section_id: outputs
+  mode: beginner
 display_only: []
 parameters:
 - name: cell_model
@@ -70,8 +83,8 @@ parameters:
   optional: true
   section_id: essential
   mode: beginner
-- {name: cell_channel, type: integer, label: Step 1 Cyto Channel, description: One-based cell/cytoplasm channel for direct segmentation. For cell expansion this field may also supply the nucleus seed channel; if both Step 1 channel fields are above 1 the Nucleus Channel wins., default: 1, minimum: 1, cli_tag: --cell-channel, cli_order: 11, optional: true, section_id: essential, mode: beginner}
-- {name: cell_nuclei_channel, type: integer, label: Step 1 Nucleus Channel, description: One-based nucleus input supplied as the second channel to direct cell models. For cell expansion either Step 1 channel field may supply the nucleus seed; this field wins when both are above 1. Use 0 to omit it., default: 0, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
+- {name: cell_channel, type: integer, label: Step 1 Cyto Channel (1-based), description: Channels start at 1 (1 = first channel). One-based cell/cytoplasm channel for direct segmentation. For cell expansion this field may also supply the nucleus seed channel; if both Step 1 channel fields are above 1 the Nucleus Channel wins., default: 1, minimum: 1, cli_tag: --cell-channel, cli_order: 11, optional: true, section_id: essential, mode: beginner}
+- {name: cell_nuclei_channel, type: integer, label: Step 1 Extra Nucleus Channel (0 = unused), description: Channels start at 1 (1 = first channel). One-based nucleus input supplied as the second channel to direct cell models. For cell expansion either Step 1 channel field may supply the nucleus seed; this field wins when both are above 1. Only this optional extra input accepts 0 to mean unused; 0 never selects the first channel., default: 0, minimum: 0, cli_tag: --cell-nuclei-channel, cli_order: 12, optional: true, section_id: essential, mode: beginner}
 - {name: cell_expansion_distance, type: float, label: Step 1 Expansion Distance (µm), description: Maximum XY distance in µm to expand each nucleus into a cell using a fast Euclidean nearest-label transform., default: 10.0, minimum: 0.0, cli_tag: --cell-expansion-distance, cli_order: 17, optional: true, section_id: essential, mode: beginner}
 - name: nucleus_model
   type: dropdown
@@ -84,7 +97,7 @@ parameters:
   optional: true
   section_id: essential
   mode: beginner
-- {name: nucleus_channel, type: integer, label: Step 2 Nucleus Channel, description: One-based signal channel used for independent nuclei detection., default: 1, minimum: 1, cli_tag: --nucleus-channel, cli_order: 22, optional: true, section_id: essential, mode: beginner}
+- {name: nucleus_channel, type: integer, label: Step 2 Nucleus Channel (1-based), description: Channels start at 1 (1 = first channel). One-based signal channel used for independent nuclei detection., default: 1, minimum: 1, cli_tag: --nucleus-channel, cli_order: 22, optional: true, section_id: essential, mode: beginner}
 - name: foci_model_1
   type: dropdown
   label: "Step 3a: Foci Detection"
@@ -96,7 +109,7 @@ parameters:
   optional: true
   section_id: essential
   mode: beginner
-- {name: foci_channel_1, type: integer, label: Step 3a Channel, description: One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
+- {name: foci_channel_1, type: integer, label: Step 3a Channel (1-based), description: Channels start at 1 (1 = first channel). One-based input channel for Step 3a., default: 1, minimum: 1, cli_tag: --foci-channel-1, cli_order: 32, optional: true, section_id: essential, mode: beginner}
 - {name: remove_border_cells, type: checkbox, label: Remove Border Cells, description: Remove cells touching an XY image border and their matched nucleus and cytoplasm labels., default: true, cli_tag: --remove-border-cells, cli_order: 43, optional: true, append_value: true, section_id: essential, mode: beginner}
 - name: existing_labels
   type: dropdown
@@ -125,11 +138,11 @@ parameters:
   section_id: essential
   mode: beginner
 - {name: foci_model_2, type: dropdown, label: "Step 3b: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-2, cli_order: 34, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_2, type: integer, label: Step 3b Channel, description: One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_2, type: integer, label: Step 3b Channel (1-based), description: Channels start at 1 (1 = first channel). One-based input channel for Step 3b., default: 1, minimum: 1, cli_tag: --foci-channel-2, cli_order: 35, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_model_3, type: dropdown, label: "Step 3c: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-3, cli_order: 37, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_3, type: integer, label: Step 3c Channel, description: One-based input channel for Step 3c., default: 1, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_3, type: integer, label: Step 3c Channel (1-based), description: Channels start at 1 (1 = first channel). One-based input channel for Step 3c., default: 1, minimum: 1, cli_tag: --foci-channel-3, cli_order: 38, optional: true, section_id: advanced, mode: advanced}
 - {name: foci_model_4, type: dropdown, label: "Step 3d: Foci Detection", description: Skip this slot or select a foci/bacteria model., options: *foci_model_options, default: skip, cli_tag: --foci-model-4, cli_order: 40, optional: true, section_id: advanced, mode: advanced}
-- {name: foci_channel_4, type: integer, label: Step 3d Channel, description: One-based input channel for Step 3d., default: 1, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: advanced, mode: advanced}
+- {name: foci_channel_4, type: integer, label: Step 3d Channel (1-based), description: Channels start at 1 (1 = first channel). One-based input channel for Step 3d., default: 1, minimum: 1, cli_tag: --foci-channel-4, cli_order: 41, optional: true, section_id: advanced, mode: advanced}
 - name: device
   type: dropdown
   label: Compute Device
@@ -182,3 +195,7 @@ parameters:
 - {name: tracking_distance_um, type: float, label: Maximum Tracking Distance (µm), description: Maximum displacement for each assignment including missed-frame recovery., default: 20.0, minimum: 0.001, cli_tag: --tracking-distance-um, cli_order: 66, optional: true, section_id: advanced, mode: advanced}
 - {name: tracking_max_gap, type: integer, label: Maximum Missed Frames, description: Maximum absent frames between observations on one trajectory., default: 2, minimum: 0, cli_tag: --tracking-max-gap, cli_order: 67, optional: true, section_id: advanced, mode: advanced}
 - {name: export_geometry, type: checkbox, label: Export Geometry Database, description: Separate matching-format database of final mask polygons and native Spotiflow points linked to measurement objects. Requires a measurement database. Automatic viewer display is separate., default: false, cli_tag: --export-geometry, cli_order: 68, optional: true, append_value: true, section_id: advanced, mode: advanced}
+
+- {name: cellpose_min_pixel_size_um, type: float, label: Cellpose Minimum XY Pixel Size (um), description: Metadata-only preflight rejects smaller X/Y calibration values before any model starts. Values are normalized to micrometers., default: 0.001, minimum: 0.000001, cli_tag: --cellpose-min-pixel-size-um, cli_order: 70, optional: true, section_id: advanced, mode: advanced}
+- {name: cellpose_max_pixel_size_um, type: float, label: Cellpose Maximum XY Pixel Size (um), description: Stop the complete run when a Cellpose field has larger X/Y calibration. Correct the source calibration; values are never clamped., default: 2.0, minimum: 0.000001, cli_tag: --cellpose-max-pixel-size-um, cli_order: 71, optional: true, section_id: advanced, mode: advanced}
+- {name: cellpose_max_rescale, type: float, label: Cellpose Maximum Enlargement, description: Stop before model probing if the effective Cellpose diameter would enlarge an image more than this factor. Preflight also checks projected working dimensions and available RAM., default: 8.0, minimum: 1.0, cli_tag: --cellpose-max-rescale, cli_order: 72, optional: true, section_id: advanced, mode: advanced}

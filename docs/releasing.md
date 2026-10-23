@@ -41,8 +41,8 @@ commit. A dry run only prints those actions.
 
 ## Version contract and release checks
 
-Stable 0.6.4 uses Git tag and Docker tag `v0.6.4`. Python packaging,
-`cisegmentation.__version__` and the plugin manifest use `0.6.4`.
+Stable 0.6.5 uses Git tag and Docker tag `v0.6.5`. Python packaging,
+`cisegmentation.__version__` and the plugin manifest use `0.6.5`.
 Update all five version locations together: `version.txt`, `config.yaml`,
 `pyproject.toml`, `cisegmentation/__init__.py` and `plugin.json`.
 The synchronization test accepts future versions and checks their agreement.

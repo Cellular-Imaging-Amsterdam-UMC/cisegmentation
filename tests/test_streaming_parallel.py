@@ -86,8 +86,9 @@ from cisegmentation.settings import SegmentationSettings
 from cisegmentation.streaming import infer_streamed, raw_array
 
 
-def _thread_backend(monkeypatch, *, oom=False, fatal=False):
+def _thread_backend(monkeypatch, *, oom=False, fatal=False, out_of_order=False):
     lock = threading.Lock()
+    third_completed = threading.Event()
     state = {"active": 0, "peak": 0, "completions": [], "pools": []}
     monkeypatch.setattr(tiles, "_can_spawn", lambda segment: True)
     current = ResourceSnapshot(4, 16 * GIB, 14 * GIB, 12 * GIB, 10 * GIB)
@@ -114,6 +115,10 @@ def _thread_backend(monkeypatch, *, oom=False, fatal=False):
             state["peak"] = max(state["peak"], active)
         try:
             time.sleep(0.04 if number % 3 == 2 else 0.008)
+            if out_of_order and number == 2:
+                # Prove reordering independently of thread scheduling and disk
+                # latency: tile 2 may finish only after tile 3 has been recorded.
+                assert third_completed.wait(timeout=30), "Tile 3 did not complete"
             if fatal and number > 1:
                 raise ValueError("invalid model configuration")
             if oom and active > 1:
@@ -127,7 +132,10 @@ def _thread_backend(monkeypatch, *, oom=False, fatal=False):
                 bounded=True,
             )
             np.save(payload["output"], predicted, allow_pickle=False)
-            state["completions"].append(number)
+            with lock:
+                state["completions"].append(number)
+                if number == 3:
+                    third_completed.set()
             return {
                 "ok": True,
                 "info": info,
@@ -164,7 +172,7 @@ def test_parallel_tiles_match_serial_labels_despite_out_of_order_completion(
         tile_size=64, tile_overlap=24, device="cpu", max_inference_workers=1
     )
     infer_streamed(image, spec, serial_settings, tmp_path / "serial.zarr", _segment)
-    state = _thread_backend(monkeypatch)
+    state = _thread_backend(monkeypatch, out_of_order=True)
     settings = SegmentationSettings(tile_size=64, tile_overlap=24, device="cpu")
     infos, _ = infer_streamed(
         image, spec, settings, tmp_path / "parallel.zarr", _segment

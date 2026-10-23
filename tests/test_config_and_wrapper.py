@@ -55,7 +55,7 @@ def test_bilayers_config_is_structurally_valid():
     assert parameters["nucleus_model"]["default"] == SKIP
     assert all(parameters[f"foci_model_{slot}"]["default"] == SKIP for slot in range(1, 5))
     assert parameters["cell_channel"]["default"] == 1
-    assert parameters["cell_channel"]["label"] == "Step 1 Cyto Channel"
+    assert parameters["cell_channel"]["label"] == "Step 1 Cyto Channel (1-based)"
     assert parameters["cell_nuclei_channel"]["default"] == 0
     assert parameters["nucleus_channel"]["default"] == 1
     assert all(parameters[f"foci_channel_{slot}"]["default"] == 1 for slot in range(1, 5))
