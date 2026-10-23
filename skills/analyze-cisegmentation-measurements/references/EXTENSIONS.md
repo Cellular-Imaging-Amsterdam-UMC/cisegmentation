@@ -1,4 +1,4 @@
-# Optional extension schema 1
+# Optional extension schemas 1 and 2
 
 Base schema 5 tables and views are unchanged. New features are optional and off
 by default. Confirm availability before querying: inspect `measurement_extensions`
@@ -154,3 +154,16 @@ crops and database inserts are bounded; polygon edges spill into temporary
 SQLite storage. Candidate assignment graphs are sparse, never dense all-pairs.
 Live allocation checks stop a graph or polygon that cannot fit in the remaining
 budget. Scientific distance gates and polygon topology are not silently reduced.
+
+## Tracking completeness (extension schema 2)
+
+Inspect `tracking_status` before interpreting tracks. It contains
+`label_set_id`, `status`, `error_type` and `details_json`. A status of `failed`
+means that label set has no published tracking result; segmentation and other
+measurements can still be complete. Do not interpret absent tracks as an absence
+of objects or motion. Older extension-schema-1 databases lack this table.
+
+`details_json` records the failure reason and effective RAM budget when tracking
+starts. Memory failures are also identified explicitly in the workflow log.
+Successful tracking for other label sets remains valid. Base schema 5 and the
+existing tracking table columns remain unchanged.

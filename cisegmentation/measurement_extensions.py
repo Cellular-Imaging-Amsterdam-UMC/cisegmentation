@@ -23,7 +23,7 @@ from .calibration import LENGTH_FACTORS_UM, effective_transform
 from .ome_zarr_io import read_image, read_native_label
 from .resources import MIB, ResourceMonitor, snapshot
 
-EXTENSION_VERSION = 1
+EXTENSION_VERSION = 2
 _SCHEMA = """
 CREATE TABLE measurement_extensions (name TEXT PRIMARY KEY, version INTEGER, settings_json TEXT);
 CREATE TABLE object_keys (object_id BIGINT PRIMARY KEY, object_uuid TEXT UNIQUE);
@@ -35,6 +35,7 @@ CREATE TABLE spot_counts (object_id BIGINT, spot_label_set_id BIGINT, spot_count
 CREATE TABLE colocalization_thresholds (image_id BIGINT, timepoint INTEGER, channel_id BIGINT, threshold DOUBLE, sample_count BIGINT, method TEXT, sampling_json TEXT, PRIMARY KEY(image_id,timepoint,channel_id));
 CREATE TABLE colocalization_measurements (object_id BIGINT, channel_a_id BIGINT, channel_b_id BIGINT, pearson_r DOUBLE, manders_a_in_b DOUBLE, manders_b_in_a DOUBLE, sample_count BIGINT, reason TEXT, PRIMARY KEY(object_id,channel_a_id,channel_b_id));
 CREATE TABLE tracking_parameters (label_set_id BIGINT PRIMARY KEY, distance_um DOUBLE, maximum_missed_frames INTEGER, divisions_enabled BOOLEAN, algorithm TEXT);
+CREATE TABLE tracking_status (label_set_id BIGINT PRIMARY KEY, status TEXT, error_type TEXT, details_json TEXT);
 CREATE TABLE tracks (track_id BIGINT PRIMARY KEY, image_id BIGINT, label_set_id BIGINT, lineage_id BIGINT, parent_track_id BIGINT, start_frame INTEGER, end_frame INTEGER, observation_count BIGINT, duration DOUBLE, path_length_um DOUBLE, displacement_um DOUBLE, mean_speed DOUBLE, maximum_speed DOUBLE, directionality DOUBLE, time_unit TEXT, speed_unit TEXT);
 CREATE TABLE track_observations (object_id BIGINT PRIMARY KEY, track_id BIGINT, z_um DOUBLE, y_um DOUBLE, x_um DOUBLE, coordinate_source TEXT);
 CREATE TABLE temporal_links (source_object_id BIGINT, target_object_id BIGINT, kind TEXT, frame_difference INTEGER, elapsed DOUBLE, distance_um DOUBLE, speed DOUBLE, time_unit TEXT, PRIMARY KEY(source_object_id,target_object_id));
@@ -350,7 +351,7 @@ def write_extensions(
         return {"enabled": False}, None
     from .extension_workers import ExtensionWorkers
     from .geometry import point_wkb
-    from .tracking import link_observations
+    from .tracking_store import TrackingRun
 
     finalization = finalization or {}
     stage_dir = Path(stage_dir)
@@ -360,8 +361,10 @@ def write_extensions(
     geometry_path = stage_dir / (
         "geometry.duckdb" if database_format == "duckdb" else "geometry.sqlite"
     )
-    geometry_id, track_offset, lineage_offset = 0, 0, 0
+    geometry_id, track_offset = 0, 0
+    tracking_runs = []
     workers = ExtensionWorkers(settings.max_measurement_workers)
+    workers_closed = False
     try:
         from .resources import log_resource_check, snapshot
 
@@ -499,170 +502,217 @@ def write_extensions(
                     label_array.cache = ChunkCache(
                         min(64 * MIB, max(MIB, snapshot().ram_available // 32))
                     )
-                    observations = []
+                    tracking = None
+                    if settings.tracking:
+                        tracking = TrackingRun(
+                            stage_dir / f"tracking-{label_set_id}.sqlite",
+                            image_id,
+                            label_set_id,
+                            name,
+                            object_type,
+                            settings,
+                            seconds,
+                            log,
+                        )
+                        tracking_runs.append(tracking)
                     for t in range(image.data.shape[0]):
                         count = db.execute(
                             "SELECT count(*) FROM objects WHERE label_set_id=? AND timepoint=?",
                             (label_set_id, t),
                         ).fetchone()[0]
-                        if count * 2048 > snapshot().ram_available // 4:
+                        if (
+                            settings.spatial_measurements
+                            and count * 2048 > snapshot().ram_available // 4
+                        ):
                             raise MemoryError(
                                 "Optional measurements object batch exceeds live RAM budget"
                             )
-                        data = db.execute(
+                        cursor = db.cursor()
+                        cursor.execute(
                             "SELECT object_id,label_value,centroid_z_px,centroid_y_px,centroid_x_px,voxel_count,bbox_min_z_px,bbox_min_y_px,bbox_min_x_px,bbox_max_z_px,bbox_max_y_px,bbox_max_x_px FROM objects WHERE label_set_id=? AND timepoint=? ORDER BY object_id",
                             (label_set_id, t),
-                        ).fetchall()
-                        native = (
-                            {
-                                int(v): (float(z), float(y), float(x))
-                                for v, z, y, x in point_db.execute(
-                                    "SELECT label,z,y,x FROM points WHERE label_name=? AND t=?",
-                                    (name, t),
-                                )
-                            }
-                            if point_db
-                            else {}
                         )
                         objects = []
                         plane = label_array[t, 0]
-                        computed = workers.objects(
-                            image,
-                            plane,
-                            data,
-                            resource=resource,
-                            store=store,
-                            name=name,
-                            t=t,
-                            pairs=pairs,
-                            limits=limits_by_t.get(t, {}),
-                            geometry=geo is not None,
-                            locations_only=locations_only,
-                            spool=stage_dir / "polygon-edges.sqlite",
-                        )
-                        for row, (computed_id, coloc, polygons) in zip(
-                            data, computed, strict=True
-                        ):
-                            oid, value, z, y, x, size, *bbox = row
-                            if computed_id != oid:
-                                raise RuntimeError(
-                                    "Optional measurement worker changed object order"
+                        try:
+                            while True:
+                                data = (
+                                    cursor.fetchall()
+                                    if settings.spatial_measurements
+                                    else cursor.fetchmany(512)
                                 )
-                            pixel = np.asarray(
-                                native.get(int(value), (z or 0, y, x)), dtype=float
-                            )
-                            position = pixel * scales + translation
-                            point_source = (
-                                "spotiflow_subpixel"
-                                if int(value) in native
-                                else "raster_centroid"
-                            )
-                            p = {
-                                "id": int(oid),
-                                "label": int(value),
-                                "t": t,
-                                "position": position,
-                                "pixel": pixel,
-                                "size": int(size or 0),
-                                "bbox": bbox,
-                                "source": point_source,
-                            }
-                            objects.append(p)
-                            object_uuid = str(
-                                uuid5(
-                                    UUID(store_uuid),
-                                    f"{resource_path}:{label_path}:{t}:{value}",
-                                )
-                            )
-                            sink.add("object_keys", (oid, object_uuid))
-                            if int(value) in native:
-                                sink.add(
-                                    "point_localizations", (oid, *pixel, point_source)
-                                )
-                            if settings.colocalization:
-                                if locations_only:
-                                    # Native point labels have NULL legacy boxes.
-                                    anchor = (int(z or 0), int(y), int(x))
-                                    bbox = [*anchor, *(v + 1 for v in anchor)]
-                                for pair, values in zip(pairs, coloc, strict=True):
-                                    sink.add(
-                                        "colocalization_measurements",
-                                        (
-                                            oid,
-                                            channels[pair[0]][0],
-                                            channels[pair[1]][0],
-                                            *values,
-                                        ),
-                                    )
-                            if geo is not None:
-                                physical = position if valid else [None, None, None]
-                                common = (
-                                    oid,
-                                    object_uuid,
-                                    store_uuid,
-                                    image_id,
-                                    resource_path,
-                                    label_set_id,
-                                    name,
-                                    value,
-                                    t,
-                                )
-                                if locations_only:
-                                    geometry_id += 1
-                                    zz, yy, xx = map(float, pixel)
-                                    geo_sink.add(
-                                        "geometries",
-                                        (
-                                            geometry_id,
-                                            *common,
-                                            None,
-                                            "POINT Z"
-                                            if image.data.shape[2] > 1
-                                            else "POINT",
-                                            point_wkb(
-                                                xx,
-                                                yy,
-                                                zz if image.data.shape[2] > 1 else None,
+                                if not data:
+                                    break
+                                native = (
+                                    {
+                                        int(v): (float(z), float(y), float(x))
+                                        for v, z, y, x in point_db.execute(
+                                            "SELECT label,z,y,x FROM points WHERE label_name=? AND t=?"
+                                            + (
+                                                ""
+                                                if settings.spatial_measurements
+                                                else " AND label IN ("
+                                                + ",".join("?" for _ in data)
+                                                + ")"
                                             ),
-                                            "pixel",
-                                            xx,
-                                            yy,
-                                            xx,
-                                            yy,
-                                            xx,
-                                            yy,
-                                            zz,
-                                            physical[2],
-                                            physical[1],
-                                            physical[0],
-                                            None,
-                                            point_source,
-                                        ),
-                                    )
-                                else:
-                                    for zz, result in polygons:
-                                        wkb, kind, area, bounds = result
-                                        geometry_id += 1
-                                        geo_sink.add(
-                                            "geometries",
-                                            (
-                                                geometry_id,
-                                                *common,
-                                                zz,
-                                                kind,
-                                                wkb,
-                                                "pixel",
-                                                *bounds,
-                                                float(pixel[2]),
-                                                float(pixel[1]),
-                                                float(pixel[0]),
-                                                physical[2],
-                                                physical[1],
-                                                physical[0],
-                                                area,
-                                                "final_mask",
-                                            ),
+                                            (name, t)
+                                            if settings.spatial_measurements
+                                            else (name, t, *(row[1] for row in data)),
                                         )
+                                    }
+                                    if point_db
+                                    else {}
+                                )
+                                computed = workers.objects(
+                                    image,
+                                    plane,
+                                    data,
+                                    resource=resource,
+                                    store=store,
+                                    name=name,
+                                    t=t,
+                                    pairs=pairs,
+                                    limits=limits_by_t.get(t, {}),
+                                    geometry=geo is not None,
+                                    locations_only=locations_only,
+                                    spool=stage_dir / "polygon-edges.sqlite",
+                                )
+                                for row, (computed_id, coloc, polygons) in zip(
+                                    data, computed, strict=True
+                                ):
+                                    oid, value, z, y, x, size, *bbox = row
+                                    if computed_id != oid:
+                                        raise RuntimeError(
+                                            "Optional measurement worker changed object order"
+                                        )
+                                    pixel = np.asarray(
+                                        native.get(int(value), (z or 0, y, x)),
+                                        dtype=float,
+                                    )
+                                    position = pixel * scales + translation
+                                    point_source = (
+                                        "spotiflow_subpixel"
+                                        if int(value) in native
+                                        else "raster_centroid"
+                                    )
+                                    p = {
+                                        "id": int(oid),
+                                        "label": int(value),
+                                        "t": t,
+                                        "position": position,
+                                        "pixel": pixel,
+                                        "size": int(size or 0),
+                                        "bbox": bbox,
+                                        "source": point_source,
+                                    }
+                                    if settings.spatial_measurements:
+                                        objects.append(p)
+                                    if tracking is not None:
+                                        tracking.add(p)
+                                    object_uuid = str(
+                                        uuid5(
+                                            UUID(store_uuid),
+                                            f"{resource_path}:{label_path}:{t}:{value}",
+                                        )
+                                    )
+                                    sink.add("object_keys", (oid, object_uuid))
+                                    if int(value) in native:
+                                        sink.add(
+                                            "point_localizations",
+                                            (oid, *pixel, point_source),
+                                        )
+                                    if settings.colocalization:
+                                        if locations_only:
+                                            # Native point labels have NULL legacy boxes.
+                                            anchor = (int(z or 0), int(y), int(x))
+                                            bbox = [*anchor, *(v + 1 for v in anchor)]
+                                        for pair, values in zip(
+                                            pairs, coloc, strict=True
+                                        ):
+                                            sink.add(
+                                                "colocalization_measurements",
+                                                (
+                                                    oid,
+                                                    channels[pair[0]][0],
+                                                    channels[pair[1]][0],
+                                                    *values,
+                                                ),
+                                            )
+                                    if geo is not None:
+                                        physical = (
+                                            position if valid else [None, None, None]
+                                        )
+                                        common = (
+                                            oid,
+                                            object_uuid,
+                                            store_uuid,
+                                            image_id,
+                                            resource_path,
+                                            label_set_id,
+                                            name,
+                                            value,
+                                            t,
+                                        )
+                                        if locations_only:
+                                            geometry_id += 1
+                                            zz, yy, xx = map(float, pixel)
+                                            geo_sink.add(
+                                                "geometries",
+                                                (
+                                                    geometry_id,
+                                                    *common,
+                                                    None,
+                                                    "POINT Z"
+                                                    if image.data.shape[2] > 1
+                                                    else "POINT",
+                                                    point_wkb(
+                                                        xx,
+                                                        yy,
+                                                        zz
+                                                        if image.data.shape[2] > 1
+                                                        else None,
+                                                    ),
+                                                    "pixel",
+                                                    xx,
+                                                    yy,
+                                                    xx,
+                                                    yy,
+                                                    xx,
+                                                    yy,
+                                                    zz,
+                                                    physical[2],
+                                                    physical[1],
+                                                    physical[0],
+                                                    None,
+                                                    point_source,
+                                                ),
+                                            )
+                                        else:
+                                            for zz, result in polygons:
+                                                wkb, kind, area, bounds = result
+                                                geometry_id += 1
+                                                geo_sink.add(
+                                                    "geometries",
+                                                    (
+                                                        geometry_id,
+                                                        *common,
+                                                        zz,
+                                                        kind,
+                                                        wkb,
+                                                        "pixel",
+                                                        *bounds,
+                                                        float(pixel[2]),
+                                                        float(pixel[1]),
+                                                        float(pixel[0]),
+                                                        physical[2],
+                                                        physical[1],
+                                                        physical[0],
+                                                        area,
+                                                        "final_mask",
+                                                    ),
+                                                )
+                        finally:
+                            cursor.close()
                         if settings.spatial_measurements:
                             rows, contact_rows = spatial_rows(
                                 objects,
@@ -675,88 +725,8 @@ def write_extensions(
                                 sink.add("spatial_measurements", row)
                             for row in contact_rows:
                                 sink.add("object_contacts", row)
-                        if settings.tracking:
-                            observations.extend(objects)
-                            if len(observations) * 2048 > snapshot().ram_available // 4:
-                                raise MemoryError(
-                                    "Tracking observations exceed live RAM budget"
-                                )
-                    if settings.tracking:
-                        divide = settings.tracking_divisions and object_type in {
-                            "cells",
-                            "nuclei",
-                        }
-                        sink.add(
-                            "tracking_parameters",
-                            (
-                                label_set_id,
-                                settings.tracking_distance_um,
-                                settings.tracking_max_gap,
-                                divide,
-                                "sparse_two_stage_lap_v1",
-                            ),
-                        )
-                        tracks, assignments, links = link_observations(
-                            observations,
-                            radius=settings.tracking_distance_um,
-                            max_gap=settings.tracking_max_gap,
-                            divisions=divide,
-                            object_type=object_type,
-                            seconds_per_frame=seconds,
-                        )
-                        assignments = dict(assignments)
-                        for track, lineage, parent, *values in tracks:
-                            sink.add(
-                                "tracks",
-                                (
-                                    track + track_offset,
-                                    image_id,
-                                    label_set_id,
-                                    lineage + lineage_offset,
-                                    parent + track_offset if parent else None,
-                                    *values,
-                                    time_unit,
-                                    f"micrometer_per_{time_unit}",
-                                ),
-                            )
-                        for p in observations:
-                            sink.add(
-                                "track_observations",
-                                (
-                                    p["id"],
-                                    assignments[p["id"]] + track_offset,
-                                    *p["position"],
-                                    p["source"],
-                                ),
-                            )
-                        daughters = defaultdict(list)
-                        for a, b, kind, frames, elapsed, distance, speed in links:
-                            sink.add(
-                                "temporal_links",
-                                (
-                                    a,
-                                    b,
-                                    kind,
-                                    frames,
-                                    elapsed,
-                                    distance,
-                                    speed,
-                                    time_unit,
-                                ),
-                            )
-                            if kind == "division":
-                                daughters[a].append(b)
-                        for parent, children in daughters.items():
-                            sink.add(
-                                "cell_divisions",
-                                (
-                                    parent,
-                                    *sorted(children),
-                                    assignments[parent] + track_offset,
-                                ),
-                            )
-                        track_offset += len(tracks)
-                        lineage_offset += len(tracks)
+                    if tracking is not None:
+                        tracking.seal()
                     if log:
                         log(
                             f"Optional measurements: {resource_path or resource.name}/{name} completed"
@@ -782,11 +752,23 @@ def write_extensions(
         if geo is not None:
             geo_sink.flush()
             geo.execute("COMMIT")
+        # Inference/geometry workers are no longer needed. Release their RSS
+        # before sizing tracking against the job's live memory allocation.
+        workers.close()
+        workers_closed = True
+        tracking_results = []
+        for tracking in tracking_runs:
+            result, counts, tracks = tracking.finish(db, database_format, track_offset)
+            tracking_results.append(result)
+            track_offset += tracks
+            for table, count in counts.items():
+                sink.counts[table] += count
         summary = {
             "enabled": True,
             "extension_version": EXTENSION_VERSION,
             "rows": dict(sink.counts),
             "geometry_rows": geometry_id,
+            "tracking": tracking_results,
             "cpu_workers": workers.used_workers,
             "runtime_seconds": time.perf_counter() - started,
         }
@@ -805,7 +787,10 @@ def write_extensions(
             db.execute("ROLLBACK")
         raise
     finally:
-        workers.close()
+        for tracking in tracking_runs:
+            tracking.close()
+        if not workers_closed:
+            workers.close()
         db.close()
         if geo is not None:
             geo.close()
