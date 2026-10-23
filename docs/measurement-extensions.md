@@ -2,13 +2,14 @@
 
 These additions are disabled by default. Base measurement schema 5, views,
 frame-local label values, object IDs and original CLI flags retain their behavior.
-Extension schema 1 is recorded separately in `measurement_extensions`.
+Extension schema 2 is recorded separately in `measurement_extensions`.
 
 Geometry and colocalization are computed in ordered batches of 64 objects in
 spawned CPU processes, including for a single image store. The parent remains
 the only database writer, so SQLite/DuckDB locks and geometry/object IDs retain
-their serial behavior. Spatial neighbors and tracking retain their field-level
-calculations. Frames with fewer than 256 objects use the serial path.
+their serial behavior. Spatial neighbors retain their frame-level calculations. Tracking spools history
+to disk and matches pairs of frames within the effective job RAM budget. See
+[tracking memory and incomplete results](tracking-memory.md). Frames with fewer than 256 objects use the serial path.
 
 The worker limit respects Slurm CPU allocation, affinity/container limits,
 physical cores, available RAM and `--max-measurement-workers`; one CPU is reserved

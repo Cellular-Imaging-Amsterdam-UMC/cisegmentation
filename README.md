@@ -21,12 +21,12 @@ parameters use OME-Zarr calibration. Enable at least one segmentation step.
 
 ## Get started
 
-In BIOMERO, configure the workflow repository at `tree/v0.6.5`, initialize
+In BIOMERO, configure the workflow repository at `tree/v0.6.6`, initialize
 the image, then select the installed version and input image or plate.
 The published headless image is:
 
 ```sh
-docker pull cellularimagingcf/w_cisegmentation:v0.6.5
+docker pull cellularimagingcf/w_cisegmentation:v0.6.6
 ```
 
 For the Windows local frontend, run `create_env.cmd`, then `launch.cmd`.
@@ -52,6 +52,7 @@ checks. See [resource evidence](docs/slurm-resource-checks.md).
 | Allocation logs, MIG evidence and recovery checks | [Slurm resource checks](docs/slurm-resource-checks.md) |
 | Measurement schema, units and query examples | [Measurements](docs/measurements.md) |
 | Spatial measurements, colocalization, tracking and geometry | [Measurement extensions](docs/measurement-extensions.md) |
+| Tracking RAM limits and retained output after tracking failure | [Tracking memory](docs/tracking-memory.md) |
 | Retained validation inputs | [Public datasets](docs/publicdata.md) |
 | Checkpoints, offline runtime and Docker caches | [Models](docs/models.md) |
 | Repository structure and test layers | [Development](docs/development.md) |
