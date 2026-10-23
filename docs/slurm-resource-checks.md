@@ -65,7 +65,7 @@ recovery wait is bounded to 30 seconds; persistent pressure raises a clear error
 Pull the version explicitly for reproducible validation:
 
 ```sh
-docker pull cellularimagingcf/w_cisegmentation:v0.6.4
+docker pull cellularimagingcf/w_cisegmentation:v0.6.5
 ```
 
 Configure the acceptance workflow/SIF to use this tag, then run inside the

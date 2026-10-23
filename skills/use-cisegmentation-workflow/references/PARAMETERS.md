@@ -123,6 +123,21 @@ distance gates or discard vertices. Additional output requires temporary disk sp
 
 ## Conditional validation
 
+Cellpose calibration is checked for every input field before model probes,
+pixel reads, or output staging. X/Y values are converted to micrometers and
+must lie within the configured range; native 3D also requires positive physical
+Z spacing. Any invalid field stops the complete run with its source and an
+explanation in the log. Calibration is never invented or clamped.
+
+| Name | Default | Meaning |
+| --- | --- | --- |
+| `cellpose_min_pixel_size_um` | `0.001` | Minimum calibrated X/Y pixel size in micrometers; finite and positive. |
+| `cellpose_max_pixel_size_um` | `2.0` | Maximum calibrated X/Y pixel size in micrometers; at least the minimum. The lateral limit does not apply to Z spacing. |
+| `cellpose_max_rescale` | `8.0` | Maximum predicted Cellpose enlargement, at least 1. Preflight also checks working dimensions and estimated array memory. |
+
+Change calibration bounds only after independently verifying source metadata.
+The supported model-default diameter (`-1`) does not bypass calibration checks.
+
 - Reject channel `0` except for `cell_nuclei_channel`, where it means omitted.
 - For direct Step 1 models, pass a distinct positive
   `cell_nuclei_channel` as the optional second channel.

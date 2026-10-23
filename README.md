@@ -21,12 +21,12 @@ parameters use OME-Zarr calibration. Enable at least one segmentation step.
 
 ## Get started
 
-In BIOMERO, configure the workflow repository at `tree/v0.6.4`, initialize
+In BIOMERO, configure the workflow repository at `tree/v0.6.5`, initialize
 the image, then select the installed version and input image or plate.
 The published headless image is:
 
 ```sh
-docker pull cellularimagingcf/w_cisegmentation:v0.6.4
+docker pull cellularimagingcf/w_cisegmentation:v0.6.5
 ```
 
 For the Windows local frontend, run `create_env.cmd`, then `launch.cmd`.
@@ -67,3 +67,35 @@ Optional Gradio and Jupyter builds are maintained separately in
 and Docker Hub publication.
 
 Licensed under [MIT](LICENSE).
+
+
+### Channel numbering and Cellpose calibration preflight
+
+Channel selections are **one-based** everywhere: `1` selects the first image
+channel, `2` the second, and so on. The optional **extra nucleus channel** in
+Step 1 alone uses `0` to mean **unused**, never the first channel. Disable an
+entire segmentation step by selecting `Skip`. Every active channel is checked
+against every input field before inference.
+
+Cellpose inputs require valid physical X/Y calibration, resolved from NGFF
+metadata or matching embedded OME-XML and converted to micrometers. The default
+plausibility range is **0.001 to 2.0 um/pixel**, inclusive, independently for X
+and Y. Native 3D also requires positive calibrated Z spacing; the lateral
+2 um limit is not applied to the distance between Z planes. Use
+`--cellpose-min-pixel-size-um` and `--cellpose-max-pixel-size-um` only when the
+source metadata has been independently verified.
+
+The metadata-only preflight checks the entire run before staging output,
+model initialization, inference probes, or measurements. Invalid calibration
+in a later field aborts the complete run with a source/field-specific log
+message; no calibration is invented or clamped. `diameter=-1` selects the
+supported model-default scale but does not waive the calibration check.
+Excessive enlargement (default maximum `--cellpose-max-rescale=8`), projected
+working dimensions, and a conservative estimate of working-array RAM are also
+checked without allocating the projected arrays. This is a safety estimate,
+not a measurement of the eventual model's peak memory.
+
+Normal segmentation defaults to DuckDB measurements. The Bilayers descriptor
+also declares DuckDB/SQLite as optional measurement outputs, allowing BIOMERO
+to suggest returning those files as attachments. Skip and benchmark mode do
+not produce a measurement database.

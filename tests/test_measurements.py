@@ -336,6 +336,11 @@ def test_output_store_uuid_matches_zarr_and_database(tmp_path):
 def test_workflow_writes_database_next_to_output_and_skip_omits_it(
     tmp_path, monkeypatch
 ):
+    # This unit test supplies in-memory I/O doubles, not a real input store.
+    # Metadata preflight with actual stores is covered in test_preflight.py.
+    monkeypatch.setattr(
+        "cisegmentation.preflight.validate_inputs", lambda *_args, **_kwargs: (1, 0)
+    )
     result = _measurement_result(tmp_path)
     store = tmp_path / "sample.ome.zarr"
     result.source.resource.store_path = store
@@ -389,6 +394,10 @@ def test_workflow_writes_database_next_to_output_and_skip_omits_it(
 def test_hcs_workflow_writes_and_measures_each_field_before_segmenting_next(
     tmp_path, monkeypatch
 ):
+    # Keep this write-order test independent of filesystem metadata discovery.
+    monkeypatch.setattr(
+        "cisegmentation.preflight.validate_inputs", lambda *_args, **_kwargs: (2, 0)
+    )
     store = tmp_path / "plate.ome.zarr"
     results = [_measurement_result(tmp_path), _measurement_result(tmp_path)]
     for index, result in enumerate(results):

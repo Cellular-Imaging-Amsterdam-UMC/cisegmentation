@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
+import math
 
 
 CELL_MODELS = (
@@ -95,6 +96,9 @@ class SegmentationSettings:
     tile_depth: int = 32
     tile_overlap_z: int = 8
     tile_match_threshold: float = 0.5
+    cellpose_min_pixel_size_um: float = 0.001
+    cellpose_max_pixel_size_um: float = 2.0
+    cellpose_max_rescale: float = 8.0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -135,6 +139,30 @@ class SegmentationSettings:
         return self.cell_channel
 
     def validate_steps(self) -> None:
+        active_channels = []
+        if self.cell_model != SKIP:
+            active_channels.append(("Step 1", self.cell_expansion_channel()
+                                    if self.cell_expansion_model() else self.cell_channel))
+        if self.nucleus_model != SKIP:
+            active_channels.append(("Step 2", self.nucleus_channel))
+        active_channels.extend((f"Step 3{chr(96 + slot)}", channel)
+                               for slot, _model, channel in self.enabled_foci_steps())
+        for step, channel in active_channels:
+            if channel < 1:
+                raise ValueError(
+                    f"{step}: channel {channel} is invalid. Channels start at 1 "
+                    "(1 = first channel). Select Skip to disable a step."
+                )
+        bounds = (self.cellpose_min_pixel_size_um, self.cellpose_max_pixel_size_um,
+                  self.cellpose_max_rescale)
+        if not all(math.isfinite(value) and value > 0 for value in bounds):
+            raise ValueError("Cellpose calibration bounds and maximum rescale must be finite and positive")
+        if self.cellpose_min_pixel_size_um > self.cellpose_max_pixel_size_um:
+            raise ValueError("Cellpose minimum pixel size must not exceed the maximum")
+        if self.cellpose_max_rescale < 1:
+            raise ValueError("Cellpose maximum rescale must be at least 1")
+        if not math.isfinite(self.diameter):
+            raise ValueError("Cellpose diameter must be finite")
         if not (
             self.cell_model != SKIP
             or self.nucleus_model != SKIP
@@ -168,7 +196,6 @@ class SegmentationSettings:
             )
         if self.measurement_extensions_enabled() and self.measurements_database == SKIP:
             raise ValueError("Optional measurements/geometry require DuckDB or SQLite measurements")
-        import math
         for name in ("spatial_radius_um", "tracking_distance_um"):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
