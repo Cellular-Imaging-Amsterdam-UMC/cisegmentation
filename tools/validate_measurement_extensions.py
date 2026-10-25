@@ -1,7 +1,7 @@
 """Repeatable validation using an existing runtime; never builds an image.
 
 Run pytest for unit/compatibility coverage. This tool separately validates real
-GPU Spotiflow, public CTC tracking, or extension export over completed 40K labels.
+GPU Spotiflow, colocalization, or extension export over completed 40K labels.
 Source images/databases are read-only; all generated files go under --output.
 """
 
@@ -33,7 +33,6 @@ from cisegmentation.measurement_extensions import (
 from cisegmentation.ome_zarr_io import ImageResource, enumerate_resources, read_image
 from cisegmentation.resources import snapshot
 from cisegmentation.settings import SegmentationSettings
-from cisegmentation.tracking import link_observations
 
 
 def public_colocalization(folder, output):
@@ -96,205 +95,6 @@ def public_colocalization(folder, output):
     }
     (output / "public-colocalization.json").write_text(json.dumps(record, indent=2))
     return record
-
-
-def public_spots(archive, output):
-    """Assess linking on independent ISBI reference positions, in pixels/frames.
-
-    This isolates assignment from image detection. Physical calibration is not
-    provided in this archive: radius=20 means benchmark pixels, never micrometres.
-    Author-generated _Tracks.xml files are deliberately excluded from truth.
-    """
-    results = []
-    with zipfile.ZipFile(archive) as data:
-        names = sorted(
-            n
-            for n in data.namelist()
-            if n.endswith(".xml") and not n.endswith("_Tracks.xml")
-        )
-        for name in names:
-            root = ET.fromstring(data.read(name))
-            truth = root.find("TrackContestISBI2012")
-            if truth is None:
-                continue
-            observations, expected, truth_identity = [], set(), {}
-            for reference_id, particle in enumerate(truth.findall("particle"), 1):
-                previous = None
-                for detection in particle.findall("detection"):
-                    value = detection.attrib
-                    oid = len(observations) + 1
-                    observations.append(
-                        {
-                            "id": oid,
-                            "t": int(value["t"]),
-                            "size": 1,
-                            "position": np.array(
-                                [
-                                    float(value["z"]),
-                                    float(value["y"]),
-                                    float(value["x"]),
-                                ]
-                            ),
-                        }
-                    )
-                    truth_identity[oid] = reference_id
-                    if previous is not None:
-                        expected.add((previous, oid))
-                    previous = oid
-            started = time.perf_counter()
-            tracks, assignments, links = link_observations(
-                observations,
-                radius=20,
-                max_gap=2,
-                divisions=True,
-                object_type="spots",
-            )
-            predicted = {(a, b) for a, b, *_ in links}
-            correct = predicted & expected
-            assert all(kind != "division" for _, _, kind, *_ in links)
-            assert len({a for a, b, *_ in links}) == len(links), "Spot split"
-            assert len({b for a, b, *_ in links}) == len(links), "Spot merge"
-            assert len(assignments) == len(observations)
-            results.append(
-                {
-                    "dataset": name,
-                    "scenario": truth.attrib["scenario"],
-                    "density": truth.attrib["density"],
-                    "observations": len(observations),
-                    "reference_tracks": len(truth.findall("particle")),
-                    "predicted_tracks": len(tracks),
-                    "reference_links": len(expected),
-                    "predicted_links": len(predicted),
-                    "correct_adjacent_links": len(correct),
-                    "edge_precision": len(correct) / max(1, len(predicted)),
-                    "edge_recall": len(correct) / max(1, len(expected)),
-                    "runtime_seconds": time.perf_counter() - started,
-                    "tracking_only": True,
-                    "spot_splits": 0,
-                    "spot_merges": 0,
-                    "settings": {"radius_pixels": 20, "max_gap": 2},
-                }
-            )
-            print(
-                f"Spot benchmark {truth.attrib['scenario']}/{truth.attrib['density']}: precision {results[-1]['edge_precision']:.3f}, recall {results[-1]['edge_recall']:.3f}",
-                flush=True,
-            )
-    record = {
-        "source": "https://zenodo.org/records/14043236/",
-        "archive": str(archive),
-        "datasets": results,
-        "caveat": "Linking reference coordinates only; no image-detection accuracy assessment. Pixel/frame units, not physical calibration.",
-    }
-    assert len(results) == 6, "Expected six ISBI simulation reference datasets"
-    (output / "public-spots.json").write_text(json.dumps(record, indent=2))
-    return record
-
-
-def public_lineage(archive, output):
-    """Track reference marker positions without using truth IDs for assignment."""
-    from PIL import Image
-
-    with zipfile.ZipFile(archive) as data:
-        tracks_name = next(
-            n for n in data.namelist() if n.endswith("01_GT/TRA/man_track.txt")
-        )
-        records = [
-            tuple(map(int, line.split()))
-            for line in data.read(tracks_name).decode().splitlines()
-            if line.strip()
-        ]
-        truth = {r[0]: r for r in records}
-        masks = sorted(
-            n
-            for n in data.namelist()
-            if "01_GT/TRA/man_track" in n and n.endswith(".tif")
-        )
-        observations, truth_label = [], {}
-        for t, name in enumerate(masks):
-            with Image.open(io.BytesIO(data.read(name))) as frame:
-                mask = np.asarray(frame)
-            labels = np.unique(mask)
-            labels = labels[labels > 0]
-            positions = center_of_mass(np.ones(mask.shape, dtype="u1"), mask, labels)
-            sizes = sum_labels(np.ones(mask.shape, dtype="u1"), mask, labels)
-            for label, (y, x), size in zip(labels, positions, sizes):
-                oid = len(observations) + 1
-                observations.append(
-                    {
-                        "id": oid,
-                        "t": t,
-                        "position": np.array([0, y * 0.645, x * 0.645]),
-                        "size": int(size),
-                    }
-                )
-                truth_label[oid] = (int(label), t)
-        tracks, _assignments, links = link_observations(
-            observations,
-            radius=20,
-            max_gap=2,
-            divisions=True,
-            object_type="nuclei",
-            seconds_per_frame=1800,
-        )
-
-        def is_true(a, b, kind):
-            la, ta = truth_label[a]
-            lb, tb = truth_label[b]
-            return (
-                truth[lb][3] == la and truth[la][2] == ta and truth[lb][1] == tb
-                if kind == "division"
-                else la == lb
-            )
-
-        predicted = Counter(l[2] for l in links)
-        correct = Counter(l[2] for l in links if is_true(l[0], l[1], l[2]))
-        daughters = {}
-        for label, start, end, parent in records:
-            if parent:
-                daughters.setdefault(parent, []).append(label)
-        recovered = set()
-        predicted_daughters = {}
-        for a, b, kind, *_ in links:
-            if kind == "division":
-                predicted_daughters.setdefault(a, []).append(b)
-        for parent, children in predicted_daughters.items():
-            p = truth_label[parent][0]
-            if sorted(truth_label[c][0] for c in children) == sorted(
-                daughters.get(p, [])
-            ):
-                recovered.add(p)
-        expected_edges = sum(max(0, end - start) for _, start, end, _ in records)
-        record = {
-            "source": "https://celltrackingchallenge.net/2d-datasets/",
-            "dataset": "Fluo-N2DL-HeLa",
-            "sequence": "01",
-            "archive_sha256": None,
-            "input": "reference tracking marker centroids; no image segmentation accuracy assessment",
-            "frames": len(masks),
-            "observations": len(observations),
-            "tracks": len(tracks),
-            "predicted_links": dict(predicted),
-            "correct_links": dict(correct),
-            "link_precision": sum(correct.values()) / max(1, len(links)),
-            "ordinary_edge_recall": (correct["link"] + correct["gap"])
-            / max(1, expected_edges),
-            "reference_divisions": len(daughters),
-            "recovered_divisions": len(recovered),
-            "division_precision": len(recovered) / max(1, len(predicted_daughters)),
-            "settings": {
-                "distance_um": 20,
-                "max_missed_frames": 2,
-                "pixel_um": 0.645,
-                "seconds_per_frame": 1800,
-            },
-            "caveat": "Distance/size heuristics cannot guarantee correct biological lineages; marker sizes may differ from true mask sizes.",
-        }
-        with Path(archive).open("rb") as handle:
-            record["archive_sha256"] = hashlib.file_digest(handle, "sha256").hexdigest()
-        assert len({l[1] for l in links}) == len(links), "Unsupported merge"
-        assert predicted.get("division", 0) % 2 == 0, "Incomplete binary division"
-        (output / "public-lineage.json").write_text(json.dumps(record, indent=2))
-        return record
 
 
 def large_extensions(args, output):
@@ -442,7 +242,7 @@ def gpu_spots(fixture, output):
             nucleus_model="skip",
             foci_model_1=model,
             device="cuda",
-            tracking=True,
+
             export_geometry=True,
             spatial_measurements=True,
             max_inference_workers=1,
@@ -460,11 +260,6 @@ def gpu_spots(fixture, output):
         assert counts > 0, f"No positive detections: {model}"
         assert (
             db.execute("SELECT count(*) FROM point_localizations").fetchone()[0]
-            == counts
-        )
-        assert db.execute("SELECT count(*) FROM cell_divisions").fetchone() == (0,)
-        assert (
-            db.execute("SELECT count(*) FROM track_observations").fetchone()[0]
             == counts
         )
         fractional = db.execute(
@@ -488,8 +283,6 @@ def gpu_spots(fixture, output):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--public-lineage-zip")
-    parser.add_argument("--public-spots-zip")
     parser.add_argument("--public-colocalization")
     parser.add_argument("--large-input")
     parser.add_argument("--large-labels")
@@ -527,10 +320,6 @@ def main():
     watcher = threading.Thread(target=monitor, daemon=True)
     watcher.start()
     try:
-        if args.public_lineage_zip:
-            record["public_lineage"] = public_lineage(args.public_lineage_zip, output)
-        if args.public_spots_zip:
-            record["public_spots"] = public_spots(args.public_spots_zip, output)
         if args.public_colocalization:
             record["public_colocalization"] = public_colocalization(
                 args.public_colocalization, output

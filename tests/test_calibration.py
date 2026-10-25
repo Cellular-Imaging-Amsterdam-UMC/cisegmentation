@@ -221,7 +221,7 @@ def test_malformed_xml_and_wrong_series_dimensions_do_not_supply_calibration(tmp
     assert not calibration(read_image(resource, lazy=True))[0]
 
 
-@pytest.mark.parametrize("feature", ["spatial_measurements", "tracking"])
+@pytest.mark.parametrize("feature", ["spatial_measurements"])
 @pytest.mark.parametrize("missing_z", [False, True])
 def test_invalid_later_input_fails_before_inference_or_pixel_reads(
     tmp_path, monkeypatch, feature, missing_z
@@ -285,7 +285,7 @@ def test_xml_fallback_workflow_uses_calibration_for_models_and_measurements(
         foci_model_1="spotiflow:general",
         measurements_database="sqlite",
         spatial_measurements=True,
-        tracking=True,
+
         max_inference_workers=1,
         max_measurement_workers=1,
     )

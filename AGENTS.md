@@ -10,3 +10,8 @@
 - Do not build or rebuild any Docker image after code changes unless the user explicitly asks for a Docker build in the current request.
 - A request to implement, test, or verify a change does not implicitly authorize a Docker build.
 - When a change also affects Docker execution, report that the existing image does not yet contain the change and wait for explicit permission to rebuild it.
+
+## Language and local testing
+
+- Use English for all code comments, docstrings, documentation, skills, UI text, commit messages and new content.
+- On this workstation the historical Conda paths above are unavailable. Use `.venv/Scripts/python.exe` for local verification; keep `.venv/` ignored.

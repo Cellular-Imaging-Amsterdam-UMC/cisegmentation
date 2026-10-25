@@ -1,5 +1,9 @@
 # CI Segmentation
 
+Development branch: **0.7.0-beta1**. The descriptor and package version refer to
+this prerelease; its Docker image has not been built or published. Stable-image
+commands below still refer to the existing 0.6.6 release.
+
 GPU-enabled instance segmentation for OME-Zarr images and HCS plates, designed
 for Bilayers and BIOMERO. One CUDA 12.6 environment supports Cellpose 3,
 Cellpose-SAM v2 and the original Cellpose-SAM, PyTorch StarDist, InstanSeg and
@@ -12,7 +16,7 @@ Spotiflow, with optional local spot-mask refinement.
   adding native label groups for enabled cells, nuclei, cytoplasm, spots,
   foci or bacteria. The source remains untouched.
 - DuckDB measurements by default, with SQLite or skip options; spatial measurements,
-  colocalization, tracking and companion geometry databases are opt-in.
+  colocalization and companion geometry databases are opt-in.
 - Benchmark mode creates a model-comparison gallery instead of normal labels
   and measurements.
 
@@ -51,8 +55,7 @@ checks. See [resource evidence](docs/slurm-resource-checks.md).
 | Streaming, concurrency and timing interpretation | [Large inputs](docs/large-inputs.md) |
 | Allocation logs, MIG evidence and recovery checks | [Slurm resource checks](docs/slurm-resource-checks.md) |
 | Measurement schema, units and query examples | [Measurements](docs/measurements.md) |
-| Spatial measurements, colocalization, tracking and geometry | [Measurement extensions](docs/measurement-extensions.md) |
-| Tracking RAM limits and retained output after tracking failure | [Tracking memory](docs/tracking-memory.md) |
+| Spatial measurements, colocalization and geometry | [Measurement extensions](docs/measurement-extensions.md) |
 | Retained validation inputs | [Public datasets](docs/publicdata.md) |
 | Checkpoints, offline runtime and Docker caches | [Models](docs/models.md) |
 | Repository structure and test layers | [Development](docs/development.md) |

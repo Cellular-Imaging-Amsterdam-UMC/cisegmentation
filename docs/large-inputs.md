@@ -87,7 +87,6 @@ python tools/test_tile_parallelism.py --input /data/large.ome.zarr \
 ```
 
 
-
 ## Performance and timing provenance
 
 Loaded models are cached for the lifetime of one `wrapper.py` process using
@@ -117,7 +116,7 @@ seeds, and removed overlap pixels.
 
 Timing counters can sum work across workers and overlap phases. Use the logged
 `CI segmentation completed in ... seconds` for process elapsed time, and use the
-workflow tracker for end-to-end elapsed time. `import_seconds` measures Python
+workflow monitor for end-to-end elapsed time. `import_seconds` measures Python
 library imports, not result import into an external image server. Do not infer
 transfer/import stage durations from folder names or file modification times.
 See [resource checks](slurm-resource-checks.md) for structured allocation evidence.

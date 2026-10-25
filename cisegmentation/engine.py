@@ -1049,7 +1049,7 @@ def run_workflow(
         stores, settings, log=log,
         ram_available=diagnostics.get("effective", {}).get("ram_available"),
     )
-    if settings.spatial_measurements or settings.tracking:
+    if settings.spatial_measurements:
         emit(
             log,
             f"Spatial calibration verified: {checked} field(s), "
