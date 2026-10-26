@@ -83,10 +83,6 @@ class SegmentationSettings:
     spatial_radius_um: float = 50.0
     colocalization: bool = False
     colocalization_pairs: str = "all"
-    tracking: bool = False
-    tracking_divisions: bool = True
-    tracking_distance_um: float = 20.0
-    tracking_max_gap: int = 2
     export_geometry: bool = False
     remove_border_cells: bool = True
     labels_log_info: bool = False
@@ -125,7 +121,7 @@ class SegmentationSettings:
 
     def measurement_extensions_enabled(self) -> bool:
         return any((self.spatial_measurements, self.colocalization,
-                    self.tracking, self.export_geometry))
+                    self.export_geometry))
 
     def cell_expansion_model(self) -> str | None:
         if not self.cell_model.startswith(EXPANSION_PREFIX):
@@ -196,12 +192,10 @@ class SegmentationSettings:
             )
         if self.measurement_extensions_enabled() and self.measurements_database == SKIP:
             raise ValueError("Optional measurements/geometry require DuckDB or SQLite measurements")
-        for name in ("spatial_radius_um", "tracking_distance_um"):
+        for name in ("spatial_radius_um",):
             value = getattr(self, name)
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and greater than zero")
-        if self.tracking_max_gap < 0:
-            raise ValueError("Tracking maximum missed frames must be zero or greater")
         if self.existing_labels not in EXISTING_LABEL_POLICIES:
             raise ValueError(
                 "Existing Labels must be remove, overwrite, or append"

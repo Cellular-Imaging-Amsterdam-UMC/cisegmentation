@@ -13,8 +13,7 @@ panels unchanged into the render call. A shortened table is useful for display
 but is not sufficient render evidence.
 
 Do not ask “render now?” or “go?” when the target, channels, crop, and overlays
-are already known. Do not claim object tracking unless the database contains
-tracking relationships.
+are already known.
 
 ## Object galleries
 
@@ -70,7 +69,7 @@ ranked cells to request representative PNG panels when useful.
 
 - Show the sharpest and least-sharp Z planes.
 - Show the same field across selected timepoints.
-- Show signal or segmentation changes across Z without calling them tracks.
+- Show signal or segmentation changes across Z using the correct axis names.
 
 Keep all selected panels on the same display ranges when visual comparison is
 the point.

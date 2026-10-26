@@ -23,7 +23,7 @@ from .calibration import LENGTH_FACTORS_UM, effective_transform
 from .ome_zarr_io import read_image, read_native_label
 from .resources import MIB, ResourceMonitor, snapshot
 
-EXTENSION_VERSION = 2
+EXTENSION_VERSION = 3
 _SCHEMA = """
 CREATE TABLE measurement_extensions (name TEXT PRIMARY KEY, version INTEGER, settings_json TEXT);
 CREATE TABLE object_keys (object_id BIGINT PRIMARY KEY, object_uuid TEXT UNIQUE);
@@ -34,12 +34,6 @@ CREATE TABLE object_contacts (source_object_id BIGINT, target_object_id BIGINT, 
 CREATE TABLE spot_counts (object_id BIGINT, spot_label_set_id BIGINT, spot_count BIGINT, PRIMARY KEY(object_id,spot_label_set_id));
 CREATE TABLE colocalization_thresholds (image_id BIGINT, timepoint INTEGER, channel_id BIGINT, threshold DOUBLE, sample_count BIGINT, method TEXT, sampling_json TEXT, PRIMARY KEY(image_id,timepoint,channel_id));
 CREATE TABLE colocalization_measurements (object_id BIGINT, channel_a_id BIGINT, channel_b_id BIGINT, pearson_r DOUBLE, manders_a_in_b DOUBLE, manders_b_in_a DOUBLE, sample_count BIGINT, reason TEXT, PRIMARY KEY(object_id,channel_a_id,channel_b_id));
-CREATE TABLE tracking_parameters (label_set_id BIGINT PRIMARY KEY, distance_um DOUBLE, maximum_missed_frames INTEGER, divisions_enabled BOOLEAN, algorithm TEXT);
-CREATE TABLE tracking_status (label_set_id BIGINT PRIMARY KEY, status TEXT, error_type TEXT, details_json TEXT);
-CREATE TABLE tracks (track_id BIGINT PRIMARY KEY, image_id BIGINT, label_set_id BIGINT, lineage_id BIGINT, parent_track_id BIGINT, start_frame INTEGER, end_frame INTEGER, observation_count BIGINT, duration DOUBLE, path_length_um DOUBLE, displacement_um DOUBLE, mean_speed DOUBLE, maximum_speed DOUBLE, directionality DOUBLE, time_unit TEXT, speed_unit TEXT);
-CREATE TABLE track_observations (object_id BIGINT PRIMARY KEY, track_id BIGINT, z_um DOUBLE, y_um DOUBLE, x_um DOUBLE, coordinate_source TEXT);
-CREATE TABLE temporal_links (source_object_id BIGINT, target_object_id BIGINT, kind TEXT, frame_difference INTEGER, elapsed DOUBLE, distance_um DOUBLE, speed DOUBLE, time_unit TEXT, PRIMARY KEY(source_object_id,target_object_id));
-CREATE TABLE cell_divisions (parent_object_id BIGINT PRIMARY KEY, daughter_a_object_id BIGINT, daughter_b_object_id BIGINT, parent_track_id BIGINT);
 """
 _GEOMETRY_SCHEMA = """
 CREATE TABLE geometry_info (key TEXT PRIMARY KEY,value TEXT);
@@ -144,7 +138,7 @@ def require_spatial_calibration(image):
         needed = "X/Y/Z" if image.data.shape[2] > 1 else "X/Y"
         resource = image.resource
         raise ValueError(
-            f"{resource.store_path}/{resource.image_path}: spatial/tracking measurements "
+            f"{resource.store_path}/{resource.image_path}: spatial measurements "
             f"require positive calibrated {needed} pixel sizes with physical units; "
             "no usable calibration was found in NGFF metadata or embedded OME-XML "
             "(OME/METADATA.ome.xml)"
@@ -351,7 +345,6 @@ def write_extensions(
         return {"enabled": False}, None
     from .extension_workers import ExtensionWorkers
     from .geometry import point_wkb
-    from .tracking_store import TrackingRun
 
     finalization = finalization or {}
     stage_dir = Path(stage_dir)
@@ -361,8 +354,7 @@ def write_extensions(
     geometry_path = stage_dir / (
         "geometry.duckdb" if database_format == "duckdb" else "geometry.sqlite"
     )
-    geometry_id, track_offset = 0, 0
-    tracking_runs = []
+    geometry_id = 0
     workers = ExtensionWorkers(settings.max_measurement_workers)
     workers_closed = False
     try:
@@ -390,7 +382,6 @@ def write_extensions(
         features = {
             "spatial": settings.spatial_measurements,
             "colocalization": settings.colocalization,
-            "tracking": settings.tracking,
             "geometry": settings.export_geometry,
         }
         for name, enabled in features.items():
@@ -434,7 +425,7 @@ def write_extensions(
             )
             valid, scales, translation, seconds, metadata = (
                 require_spatial_calibration(image)
-                if settings.spatial_measurements or settings.tracking
+                if settings.spatial_measurements
                 else calibration(image)
             )
             time_unit = "second" if seconds else "frame"
@@ -502,19 +493,6 @@ def write_extensions(
                     label_array.cache = ChunkCache(
                         min(64 * MIB, max(MIB, snapshot().ram_available // 32))
                     )
-                    tracking = None
-                    if settings.tracking:
-                        tracking = TrackingRun(
-                            stage_dir / f"tracking-{label_set_id}.sqlite",
-                            image_id,
-                            label_set_id,
-                            name,
-                            object_type,
-                            settings,
-                            seconds,
-                            log,
-                        )
-                        tracking_runs.append(tracking)
                     for t in range(image.data.shape[0]):
                         count = db.execute(
                             "SELECT count(*) FROM objects WHERE label_set_id=? AND timepoint=?",
@@ -607,8 +585,6 @@ def write_extensions(
                                     }
                                     if settings.spatial_measurements:
                                         objects.append(p)
-                                    if tracking is not None:
-                                        tracking.add(p)
                                     object_uuid = str(
                                         uuid5(
                                             UUID(store_uuid),
@@ -725,8 +701,6 @@ def write_extensions(
                                 sink.add("spatial_measurements", row)
                             for row in contact_rows:
                                 sink.add("object_contacts", row)
-                    if tracking is not None:
-                        tracking.seal()
                     if log:
                         log(
                             f"Optional measurements: {resource_path or resource.name}/{name} completed"
@@ -752,23 +726,13 @@ def write_extensions(
         if geo is not None:
             geo_sink.flush()
             geo.execute("COMMIT")
-        # Inference/geometry workers are no longer needed. Release their RSS
-        # before sizing tracking against the job's live memory allocation.
         workers.close()
         workers_closed = True
-        tracking_results = []
-        for tracking in tracking_runs:
-            result, counts, tracks = tracking.finish(db, database_format, track_offset)
-            tracking_results.append(result)
-            track_offset += tracks
-            for table, count in counts.items():
-                sink.counts[table] += count
         summary = {
             "enabled": True,
             "extension_version": EXTENSION_VERSION,
             "rows": dict(sink.counts),
             "geometry_rows": geometry_id,
-            "tracking": tracking_results,
             "cpu_workers": workers.used_workers,
             "runtime_seconds": time.perf_counter() - started,
         }
@@ -787,8 +751,6 @@ def write_extensions(
             db.execute("ROLLBACK")
         raise
     finally:
-        for tracking in tracking_runs:
-            tracking.close()
         if not workers_closed:
             workers.close()
         db.close()

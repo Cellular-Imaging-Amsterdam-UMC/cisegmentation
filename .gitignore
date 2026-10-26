@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .cache/
+.venv/
+work/
 .ruff_cache/
 .last_launcher_settings.json
 .docker-build-state.json

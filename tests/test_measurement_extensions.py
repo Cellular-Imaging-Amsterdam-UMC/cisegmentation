@@ -18,65 +18,10 @@ from cisegmentation.measurement_extensions import (
     thresholds,
 )
 from cisegmentation.settings import SegmentationSettings
-from cisegmentation.tracking import link_observations, sparse_assignment
 
 
 def observation(oid, t, x, y=0, size=10):
     return {"id": oid, "t": t, "position": np.array([0.0, y, x]), "size": size}
-
-
-@pytest.mark.parametrize(
-    "object_type", ["cells", "nuclei", "spots", "foci", "bacteria", "cytoplasm"]
-)
-def test_binary_division_restricted_to_cells_and_nuclei(object_type):
-    obs = [observation(1, 0, 5, size=20), observation(2, 1, 4), observation(3, 1, 6)]
-    tracks, assignments, links = link_observations(
-        obs, divisions=True, object_type=object_type
-    )
-    if object_type in {"cells", "nuclei"}:
-        assert len(tracks) == 3
-        assert [l[2] for l in links] == ["division", "division"]
-        assert tracks[1][2] == tracks[2][2] == 1
-        assert tracks[0][1] == tracks[1][1] == tracks[2][1]
-    else:
-        assert len(tracks) == 2
-        assert len(links) == 1 and links[0][2] == "link"
-        assert all(t[2] is None for t in tracks)
-    assert len(dict(assignments)) == 3
-
-
-def test_gaps_speed_and_calibrated_motion():
-    obs = [observation(1, 0, 0), observation(2, 1, 3), observation(3, 4, 9)]
-    tracks, assignments, links = link_observations(
-        obs, max_gap=2, seconds_per_frame=0.5
-    )
-    assert len(tracks) == 1 and len(set(dict(assignments).values())) == 1
-    assert tracks[0][6:] == pytest.approx((2.0, 9.0, 9.0, 4.5, 6.0, 1.0))
-    assert links[1][2] == "gap" and links[1][3] == 3
-    assert len(link_observations(obs, max_gap=1)[0]) == 2
-
-
-def test_crossing_trajectories_use_observed_velocity():
-    obs = [
-        observation(1, 0, 0),
-        observation(2, 0, 10),
-        observation(3, 1, 4),
-        observation(4, 1, 6),
-        observation(5, 2, 8),
-        observation(6, 2, 2),
-    ]
-    tracks, assignments, links = link_observations(obs, radius=5)
-    assigned = dict(assignments)
-    assert assigned[1] == assigned[3] == assigned[5]
-    assert assigned[2] == assigned[4] == assigned[6]
-    assert len(tracks) == 2
-    assert all(l[2] == "link" for l in links)
-
-
-def test_no_merges_and_sparse_gate():
-    obs = [observation(1, 0, 0), observation(2, 0, 2), observation(3, 1, 1)]
-    assert len(link_observations(obs, divisions=True, object_type="cells")[2]) == 1
-    assert sparse_assignment([obs[0]], [observation(4, 1, 100)], 20) == []
 
 
 @pytest.mark.parametrize("seed", range(10))
@@ -238,7 +183,7 @@ def fake_spots(data, spec, settings, scales, **kwargs):
 @pytest.mark.parametrize("database_format", ["sqlite", "duckdb"])
 @pytest.mark.parametrize("z_size", [1, 2])
 @pytest.mark.parametrize("streaming", ["auto", "on"])
-def test_spot_only_full_workflow_native_points_geometry_and_tracking(
+def test_spot_only_full_workflow_native_points_geometry(
     tmp_path, monkeypatch, database_format, z_size, streaming
 ):
     from shapely import from_wkb
@@ -256,8 +201,8 @@ def test_spot_only_full_workflow_native_points_geometry_and_tracking(
         measurements_database=database_format,
         spatial_measurements=True,
         colocalization=True,
-        tracking=True,
-        tracking_divisions=True,
+
+
         export_geometry=True,
         streaming_mode=streaming,
         tile_size=64,
@@ -274,11 +219,6 @@ def test_spot_only_full_workflow_native_points_geometry_and_tracking(
     ).fetchone() == ("5",)
     assert db.execute("SELECT count(*) FROM objects").fetchone() == (6 * z_size,)
     assert db.execute("SELECT count(*) FROM spot_counts").fetchone() == (0,)
-    assert db.execute("SELECT count(*) FROM cell_divisions").fetchone() == (0,)
-    assert db.execute("SELECT count(*) FROM tracks").fetchone() == (2 * z_size,)
-    assert db.execute("SELECT DISTINCT time_unit FROM tracks").fetchall() == [
-        ("second",)
-    ]
     assert db.execute(
         "SELECT min(y_px-centroid_y_px),min(x_px-centroid_x_px) FROM point_localizations JOIN objects USING(object_id)"
     ).fetchone() == pytest.approx((0.25, 0.375))
@@ -323,7 +263,7 @@ def test_units_are_validated_and_uncalibrated_time_is_frames(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "name", ["spatial_measurements", "colocalization", "tracking", "export_geometry"]
+    "name", ["spatial_measurements", "colocalization", "export_geometry"]
 )
 def test_extensions_require_database_and_default_off(name):
     assert not SegmentationSettings().measurement_extensions_enabled()
@@ -385,7 +325,7 @@ def test_mask_geometry_spot_zero_counts_and_legacy_measurements_unchanged(
             **base,
             spatial_measurements=True,
             colocalization=True,
-            tracking=True,
+
             export_geometry=True,
         ),
     )
@@ -414,7 +354,6 @@ def test_mask_geometry_spot_zero_counts_and_legacy_measurements_unchanged(
     assert extended.execute(
         "SELECT shared_boundary FROM object_contacts"
     ).fetchall() == [(17.5,)]
-    assert extended.execute("SELECT count(*) FROM cell_divisions").fetchone() == (0,)
     assert (
         "measurement_extensions"
         not in [

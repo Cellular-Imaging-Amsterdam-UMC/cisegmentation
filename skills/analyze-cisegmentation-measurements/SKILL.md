@@ -1,6 +1,6 @@
 ---
 name: analyze-cisegmentation-measurements
-description: Analyze CI Segmentation DuckDB or SQLite databases for morphology, intensity, mask relationships, spot assignments, spatial neighbors and contacts, Pearson/Manders colocalization, trajectories, cell/nucleus divisions, and linked WKB polygons or subpixel spot points; includes SQL, pandas, calibration and interpretation.
+description: Analyze CI Segmentation DuckDB or SQLite databases for morphology, intensity, mask relationships, spot assignments, spatial neighbors and contacts, Pearson/Manders colocalization, and linked WKB polygons or subpixel spot points; includes SQL, pandas, calibration and interpretation.
 metadata:
   version: "7"
 ---
@@ -23,7 +23,7 @@ measurement semantics, convenience views, and query examples.
 Check the file's recorded schema before applying the bundled reference to a
 database from a different revision.
 
-For spatial, colocalization, tracking or geometry questions, also load
+For spatial, colocalization or geometry questions, also load
 [EXTENSIONS.md](references/EXTENSIONS.md). Base schema version 5 alone does
 not imply optional features exist. Read `measurement_extensions` if present;
 geometry files instead expose `geometry_info` and `geometries`.
@@ -116,12 +116,9 @@ database_files
 - Distinguish 2D masks, true 3D masks, and point-only objects.
 - Do not claim that intensities were normalized or background-corrected.
 - Separate database observations from biological interpretation.
-- Keep frame-local `label_value` separate from `object_id` and `track_id`.
-  Track IDs identify trajectory segments; daughter segments have new IDs.
+- Keep frame-local `label_value` separate from `object_id`.
 - Spot-only runs do not require cells/nuclei. Missing compartments mean no
   assignments; existing compartments with no assigned spots have zero counts.
-- Check `time_unit` before interpreting speed. Missing physical timing means
-  micrometers per frame, not micrometers per second.
 - Keep directional Manders coefficients distinct; NULL with a reason records
   an undefined statistic. Otsu thresholds are automatic and sampled.
 - Raster masks remain authoritative. Geometry uses pixel-centre coordinates,

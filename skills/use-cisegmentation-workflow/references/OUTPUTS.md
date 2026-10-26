@@ -39,12 +39,11 @@ components; 3D masks use per-Z outlines. Spotiflow point geometry preserves nati
 subpixel XYZ positions. Export does not imply automatic viewer display.
 
 Base schema 5 tables/views and raster labels remain unchanged. Optional extension
-schema 1 adds neighbor/contact measurements, compartment spot counts, automatic
-Otsu/Pearson/Manders measurements and trajectories. Only cells/nuclei can have
-parent-daughter links; spots track independently without parent segmentation.
+schema 3 adds neighbor/contact measurements, compartment spot counts, automatic
+Otsu/Pearson/Manders measurements.
 Check registry rows in `measurement_extensions`, NULL reasons, calibration and
 time units before interpreting optional results. Missing physical timing uses
-frames, including micrometers-per-frame speed.
+frame indices.
 
 ## Benchmark runs
 

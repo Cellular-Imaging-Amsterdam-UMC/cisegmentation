@@ -310,27 +310,6 @@ def validate_store(path, *, read_plane=None):
         root.store.close()
 
 
-def truth_csv(payload, path):
-    tree = ET.fromstring(payload)
-    truth = tree.find("TrackContestISBI2012")
-    if truth is None:
-        truth = tree
-    with Path(path).open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["reference_track_id", "timepoint", "z_px", "y_px", "x_px"])
-        for track, particle in enumerate(truth.findall("particle"), 1):
-            for detection in particle.findall("detection"):
-                writer.writerow(
-                    [
-                        track,
-                        detection.attrib["t"],
-                        detection.attrib.get("z", 0),
-                        detection.attrib["y"],
-                        detection.attrib["x"],
-                    ]
-                )
-
-
 def prepare(root):
     output = root / "ome-zarr"
     output.mkdir(parents=True, exist_ok=True)
@@ -368,27 +347,10 @@ def prepare(root):
                         "source": source_url,
                         "original_archive": archive_name,
                         "original_members": names,
-                        "purpose": "spot-only tracking",
+                        "purpose": "spot-only detection",
                     },
                     lambda t, c, z, names=names: decode_tiff(archive.read(names[t])),
                 )
-                xml_name = (
-                    f"{folder}/{PurePosixPath(folder).name}.xml"
-                    if archive_name.startswith("SIM")
-                    else f"{folder}/_Tracks.xml"
-                )
-                if xml_name in archive.namelist():
-                    sidecar = output / "references" / name
-                    sidecar.mkdir(parents=True, exist_ok=True)
-                    payload = archive.read(xml_name)
-                    (sidecar / "tracks.xml").write_bytes(payload)
-                    truth_csv(payload, sidecar / "tracks.csv")
-                    record["reference_tracks"] = str(sidecar / "tracks.csv")
-                    record["reference_type"] = (
-                        "ISBI simulation ground truth"
-                        if archive_name.startswith("SIM")
-                        else "authors' TrackMate trajectories, not independent simulation ground truth"
-                    )
                 records.append(record)
                 print(f"Validated {name}: {record['shape']}", flush=True)
     with zipfile.ZipFile(root / "CBS-red-green" / "CBS001RGM-CBS010RGM.zip") as archive:
@@ -421,38 +383,6 @@ def prepare(root):
             )
             records.append(record)
             print(f"Validated {title}", flush=True)
-    with zipfile.ZipFile(root / "Fluo-N2DL-HeLa.zip") as archive:
-        names = sorted(
-            n for n in archive.namelist() if re.search(r"(?:^|/)01/t\d+\.tif$", n)
-        )
-        plane = decode_tiff(archive.read(names[0]))
-        records.append(
-            create_store(
-                output / "CTC-Fluo-N2DL-HeLa-01.ome.zarr",
-                (len(names), 1, 1, *plane.shape),
-                plane.dtype,
-                [("Nuclei", "00FFFF")],
-                {
-                    "source": "https://celltrackingchallenge.net/2d-datasets/",
-                    "original_archive": "Fluo-N2DL-HeLa.zip",
-                    "purpose": "nuclear tracking with divisions",
-                },
-                lambda t, c, z: decode_tiff(archive.read(names[t])),
-                pixel_um=0.645,
-                seconds=1800,
-            )
-        )
-        sidecar = output / "references" / "CTC-Fluo-N2DL-HeLa-01"
-        sidecar.mkdir(parents=True, exist_ok=True)
-        tracks = next(
-            n for n in archive.namelist() if n.endswith("01_GT/TRA/man_track.txt")
-        )
-        (sidecar / "man_track.txt").write_bytes(archive.read(tracks))
-        records[-1]["reference_tracks"] = str(sidecar / "man_track.txt")
-        records[-1]["reference_masks"] = (
-            "Retained in original ZIP; TRA markers are not full nuclear masks."
-        )
-        print("Validated CTC HeLa sequence 01", flush=True)
     visium = root / "VisiumFluo" / "visium_fluo_image_crop.tiff"
     image = tifffile.memmap(visium).reshape(3, 7272, 7272)
     records.append(

@@ -4,7 +4,7 @@
 
 | Path | Purpose |
 | --- | --- |
-| `cisegmentation/` | Inference adapters, pipeline, resource discovery, streaming, measurements, geometry and tracking |
+| `cisegmentation/` | Inference adapters, pipeline, resource discovery, streaming, measurements and geometry |
 | `wrapper.py`, `bilayers_cli.py`, `config.yaml` | Container entrypoint, descriptor parsing and workflow contract |
 | `launcher.py`, `launch.cmd`, `requirements_launcher.txt` | Local PyQt frontend |
 | `tests/`, `tests/data/` | Regression tests and small committed OME-Zarr fixtures |

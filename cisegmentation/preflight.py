@@ -114,7 +114,7 @@ def validate_inputs(stores, settings, *, ram_available=None, log=None):
                     if model.startswith(("cellpose3:", "cellpose-sam:")):
                         _cellpose_check(image, settings, step, model, target,
                                         2 if second_channel else 1, ram_available)
-                if settings.spatial_measurements or settings.tracking:
+                if settings.spatial_measurements:
                     from .measurement_extensions import require_spatial_calibration
                     require_spatial_calibration(image)
                 checked += 1

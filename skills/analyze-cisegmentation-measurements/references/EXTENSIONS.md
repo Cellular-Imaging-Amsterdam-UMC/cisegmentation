@@ -1,16 +1,15 @@
-# Optional extension schemas 1 and 2
+# Optional extension schema 3
 
 Base schema 5 tables and views are unchanged. New features are optional and off
 by default. Confirm availability before querying: inspect `measurement_extensions`
 and its `name`, `version`, `settings_json`. Only enabled features have registry rows;
-empty extension tables alone do not mean a measurement was requested. Revision 1
-supports `spatial`, `colocalization`, `tracking`, and `geometry`.
+empty extension tables alone do not mean a measurement was requested. Revision 3
+supports `spatial`, `colocalization`, and `geometry`.
 
 ## Identity and calibration
 
 `object_id` identifies one measurement row. `label_value` is its raster value at
-that field, label set and timepoint. These are distinct from `track_id`, which
-identifies a trajectory segment. Numeric IDs need not remain stable across runs.
+that field, label set and timepoint. Numeric IDs need not remain stable across runs.
 `object_keys(object_id, object_uuid)` adds a stable UUID derived from output store
 identity, resource path, label path, timepoint and label value within one output.
 Never join outputs merely because their numeric object IDs happen to match.
@@ -18,14 +17,14 @@ Never join outputs merely because their numeric object IDs happen to match.
 `coordinate_frames` has `image_id`, `spatial_unit`, `scale_zyx_json`,
 `translation_zyx_json`, `seconds_per_frame`, `time_unit`, and `metadata_json`.
 Scale and translation compose supported dataset and global NGFF transforms.
-Spatial and tracking features require finite, positive, unit-calibrated spatial
+Spatial features require finite, positive, unit-calibrated spatial
 axes. Geometry without calibration uses pixels and NULL physical coordinates.
 Known time units convert to seconds; missing time calibration is reported as
 frames. A time scale with no time unit must not be assumed to mean seconds.
 
 `point_localizations(object_id,z_px,y_px,x_px,coordinate_source)` retains native
 Spotiflow subpixel coordinates. It does not replace legacy raster centroids.
-The source is `spotiflow_subpixel`; fallback tracking uses `raster_centroid`.
+The source is `spotiflow_subpixel`; fallback coordinates uses `raster_centroid`.
 Tiled points receive the crop origin and final label remapping before insertion.
 
 ## Spatial measurements
@@ -82,45 +81,6 @@ JOIN channels b ON b.channel_id=c.channel_b_id
 ORDER BY o.object_id LIMIT 100;
 ```
 
-## Tracking
-
-Each field and label set is independent. Adjacent-frame sparse assignment uses
-distance-gated candidates, unmatched birth/death alternatives and observed
-velocity when a previous position exists. Segment linking then considers binary
-division hypotheses for cells/nuclei before closing gaps. Divisions require
-both daughters within the 20-micrometer default gate, combined raster size
-0.5--1.8 times the parent, and each daughter at most 1.25 times its parent.
-These are heuristic hypotheses, not proof of biological division. Spots, foci,
-bacteria and cytoplasm never split; no object type merges. Unresolvable dense
-crossings can remain ambiguous. Raster label IDs are never changed by tracking.
-
-`tracking_parameters(label_set_id,distance_um,maximum_missed_frames,
-divisions_enabled,algorithm)` records the effective rules. Defaults: maximum
-distance 20 micrometers and two missed frames. The distance gate applies to total
-displacement across a gap, not distance multiplied by missing frames.
-
-`tracks`: `track_id`, `image_id`, `label_set_id`, `lineage_id`, `parent_track_id`,
-`start_frame`, `end_frame`, `observation_count`, `duration`, `path_length_um`,
-`displacement_um`, `mean_speed`, `maximum_speed`, `directionality`, `time_unit`,
-`speed_unit`. Daughter segments get new track IDs and share the root lineage.
-Path length sums consecutive observed displacements; gaps use elapsed frames.
-Directionality is displacement/path; immobile or singleton tracks have NULL
-directionality, and singleton speed is NULL. Duration excludes unobserved frames
-before birth or after death.
-
-`track_observations(object_id,track_id,z_um,y_um,x_um,coordinate_source)` maps
-each observation to its trajectory. `temporal_links(source_object_id,
-target_object_id,kind,frame_difference,elapsed,distance_um,speed,time_unit)`
-records `link`, `gap`, or `division`. `cell_divisions(parent_object_id,
-daughter_a_object_id,daughter_b_object_id,parent_track_id)` records binary events.
-
-```sql
-SELECT t.track_id, t.lineage_id, t.parent_track_id, l.object_type,
-       t.observation_count, t.duration, t.mean_speed, t.speed_unit,
-       t.directionality
-FROM tracks t JOIN label_sets l USING (label_set_id)
-ORDER BY t.track_id LIMIT 100;
-```
 
 ## Geometry companion
 
@@ -151,19 +111,5 @@ database access or install spatial extensions merely to inspect an attachment.
 
 Feature export follows final object-ID assignment and shard merging. Object
 crops and database inserts are bounded; polygon edges spill into temporary
-SQLite storage. Candidate assignment graphs are sparse, never dense all-pairs.
-Live allocation checks stop a graph or polygon that cannot fit in the remaining
-budget. Scientific distance gates and polygon topology are not silently reduced.
-
-## Tracking completeness (extension schema 2)
-
-Inspect `tracking_status` before interpreting tracks. It contains
-`label_set_id`, `status`, `error_type` and `details_json`. A status of `failed`
-means that label set has no published tracking result; segmentation and other
-measurements can still be complete. Do not interpret absent tracks as an absence
-of objects or motion. Older extension-schema-1 databases lack this table.
-
-`details_json` records the failure reason and effective RAM budget when tracking
-starts. Memory failures are also identified explicitly in the workflow log.
-Successful tracking for other label sets remains valid. Base schema 5 and the
-existing tracking table columns remain unchanged.
+SQLite storage. Live allocation checks stop a polygon that cannot fit in the remaining
+budget. Polygon topology are not silently reduced.

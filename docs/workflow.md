@@ -52,11 +52,10 @@ converted internally using the OME-Zarr XY scale metadata.
 | Benchmark Gallery (`--benchmark`) | Advanced option. Processes the first deterministic image/field and first timepoint, runs all selectable models for every enabled step, then writes only a 2D XY OME-Zarr gallery. |
 
 Optional spatial measurements (`--spatial-measurements`), channel colocalization
-(`--colocalization`), time-series tracking (`--tracking`) and a separate geometry
+(`--colocalization`) and a separate geometry
 database (`--export-geometry`) are disabled by default. They require DuckDB or
-SQLite measurements and add extension schema 1 while preserving base schema 5
-and raster label values. Cells/nuclei may divide; independent spots never split
-or merge. See [measurement extensions](measurement-extensions.md) for units,
+SQLite measurements and add extension schema 3 while preserving base schema 5
+and raster label values. See [measurement extensions](measurement-extensions.md) for units,
 controls, scientific limits and repeatable validation. Spot-only runs can skip
 both cell and nucleus detection. Retained public inputs and their pyramidal
 OME-Zarr conversion are documented in [public datasets](publicdata.md).
