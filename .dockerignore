@@ -1,5 +1,8 @@
 .git
 .gitignore
+.venv
+work
+bundled_models
 .pytest_cache
 .cache
 .ruff_cache

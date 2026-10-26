@@ -14,9 +14,20 @@ RUN if [ "$INSTALL_CHECKPOINT_DEPENDENCIES" = true ]; then \
       python -m pip install -r /app/requirements_cellpose_transformer.txt \
       && python -m pip uninstall -y triton; \
     fi
+# A previous workflow image can be used as a validated runtime cache. Remove
+# its application package first so deleted modules cannot survive the update.
+RUN rm -rf /app/cisegmentation
 COPY cisegmentation/ /app/cisegmentation/
 COPY wrapper.py bilayers_cli.py config.yaml /app/
+COPY version.txt LICENSE /app/
 COPY tools/cuda_smoke.py /app/tools/cuda_smoke.py
 RUN python -m compileall -q -j 1 /app
+
+ARG VCS_REF=unknown
+LABEL org.opencontainers.image.title="CI Segmentation headless workflow" \
+      org.opencontainers.image.version="0.7.0" \
+      org.opencontainers.image.source="https://github.com/Cellular-Imaging-Amsterdam-UMC/cisegmentation" \
+      org.opencontainers.image.revision=$VCS_REF \
+      org.opencontainers.image.licenses="MIT"
 
 ENTRYPOINT ["python", "/app/wrapper.py"]

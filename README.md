@@ -1,8 +1,6 @@
 # CI Segmentation
 
-Development branch: **0.7.0-beta1**. The descriptor and package version refer to
-this prerelease; its Docker image has not been built or published. Stable-image
-commands below still refer to the existing 0.6.6 release.
+Stable release: **v0.7.0**. GitHub and Docker Hub use the same version tag.
 
 GPU-enabled instance segmentation for OME-Zarr images and HCS plates, designed
 for Bilayers and BIOMERO. One CUDA 12.6 environment supports Cellpose 3,
@@ -25,12 +23,12 @@ parameters use OME-Zarr calibration. Enable at least one segmentation step.
 
 ## Get started
 
-In BIOMERO, configure the workflow repository at `tree/v0.6.6`, initialize
+In BIOMERO, configure the workflow repository at `tree/v0.7.0`, initialize
 the image, then select the installed version and input image or plate.
 The published headless image is:
 
 ```sh
-docker pull cellularimagingcf/w_cisegmentation:v0.6.6
+docker pull cellularimagingcf/w_cisegmentation:v0.7.0
 ```
 
 For the Windows local frontend, run `create_env.cmd`, then `launch.cmd`.
